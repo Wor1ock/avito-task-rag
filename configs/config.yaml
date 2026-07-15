@@ -1,0 +1,28 @@
+# Main Hydra configuration: composes path/model groups and defines search parameters.
+defaults:
+  - path: default
+  - model: default
+  - _self_
+
+# Number of candidates retrieved by each first-stage retriever (BM25 / FAISS).
+top_k_candidates: 100
+# Number of documents returned after fusion / re-ranking.
+top_k_final: 10
+
+# Hybrid search fusion parameters.
+hybrid:
+  # Reciprocal Rank Fusion constant: score = sum(weight / (rrf_k + rank)).
+  rrf_k: 60
+  bm25_weight: 0.5
+  dense_weight: 0.5
+
+# Optional cross-encoder re-ranking stage (disabled in the baseline).
+reranker:
+  enabled: false
+  model_name: null
+
+seed: 42
+
+hydra:
+  job:
+    chdir: false

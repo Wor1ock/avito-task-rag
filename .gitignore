@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.python-version
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# uv
+# (keep uv.lock committed)
+
+# Hydra
+.hydra/
+outputs/
+multirun/
+
+# Data and artifacts
+data/
+artifacts/
+*.faiss
+*.pkl
+
+# Model caches
+.cache/
+.hf/
+
+# Tooling
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

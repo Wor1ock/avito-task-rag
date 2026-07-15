@@ -1,0 +1,12 @@
+# Embedding model and text chunking parameters.
+bi_encoder: "sentence-transformers/LaBSE"
+device: "cuda"
+
+# Encoding parameters.
+batch_size: 64
+max_seq_length: 256
+normalize_embeddings: true
+
+# Chunking parameters (in characters; switch to tokens if needed).
+chunk_size: 1000
+chunk_overlap: 200
