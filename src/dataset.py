@@ -1,19 +1,24 @@
 """Data management layer: article loading, validation, and text enrichment.
 
-Pipeline: JSON articles -> pydantic validation -> enriched text (title
-boosting) -> normalized token corpus for lexical (BM25) and semantic indexing.
+Pipeline: Feather/JSON articles -> HTML cleaning -> pydantic validation ->
+enriched text (title boosting) -> normalized token corpus for lexical (BM25)
+and semantic indexing. Also hosts the shared Feather table loader used for
+the calibration and test query sets.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import warnings
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+import pandas as pd
 from pydantic import BaseModel
 
-from src.utils import tokenize
+from src.utils import clean_html, tokenize
 
 logger = logging.getLogger("rag.dataset")
 
@@ -45,6 +50,35 @@ class Chunk:
     text: str
 
 
+def load_feather_table(file_path: str | Path, required_columns: Sequence[str]) -> pd.DataFrame:
+    """Load a Feather table and validate its schema.
+
+    Args:
+        file_path: Path to the ``.f`` / ``.feather`` file.
+        required_columns: Columns that must be present.
+
+    Returns:
+        The loaded dataframe.
+
+    Raises:
+        FileNotFoundError: If ``file_path`` does not exist.
+        ValueError: If any required column is missing.
+    """
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Feather file not found: {path}")
+    with warnings.catch_warnings():
+        # pandas delegates to pyarrow.feather.read_feather, deprecated in pyarrow 24
+        # in favor of the IPC reader; silence the noise until pandas migrates.
+        warnings.simplefilter("ignore", FutureWarning)
+        df = pd.read_feather(path)
+    missing = [column for column in required_columns if column not in df.columns]
+    if missing:
+        raise ValueError(f"{path} is missing required columns {missing}; found {list(df.columns)}")
+    logger.info("Loaded %d rows from %s (columns: %s)", len(df), path, list(df.columns))
+    return df
+
+
 class ArticleDataset:
     """In-memory article store with validation and enrichment helpers."""
 
@@ -72,6 +106,32 @@ class ArticleDataset:
             raise ValueError(f"Expected a JSON list of articles, got {type(raw).__name__}")
         self.articles = [Article.model_validate(item) for item in raw]
         logger.info("Loaded %d articles from %s", len(self.articles), path)
+
+    def load_from_feather(self, file_path: str | Path) -> None:
+        """Load articles from a Feather file, cleaning the HTML ``body`` column.
+
+        Expects ``article_id``, ``title``, and ``body`` columns; ``body`` is
+        passed through :func:`src.utils.clean_html` before validation, so the
+        indexing corpuses are built over pure text.
+
+        Args:
+            file_path: Path to the articles ``.f`` file.
+
+        Raises:
+            FileNotFoundError: If ``file_path`` does not exist.
+            ValueError: If required columns are missing.
+            pydantic.ValidationError: If any row fails schema validation.
+        """
+        df = load_feather_table(file_path, required_columns=("article_id", "title", "body"))
+        self.articles = [
+            Article(
+                article_id=int(row.article_id),
+                title=str(row.title),
+                text=clean_html(str(row.body)),
+            )
+            for row in df.itertuples(index=False)
+        ]
+        logger.info("Parsed %d articles (HTML stripped) from %s", len(self.articles), file_path)
 
     def get_enriched_text(self, article: Article) -> str:
         """Concatenate title and body, repeating the title to boost its weight.

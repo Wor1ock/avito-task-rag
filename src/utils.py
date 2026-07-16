@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import logging
 import re
 import sys
@@ -11,8 +12,31 @@ from pathlib import Path
 # Unicode-aware, so Cyrillic is preserved) and not whitespace — i.e. punctuation.
 _PUNCTUATION_RE = re.compile(r"[^\w\s]+")
 _WHITESPACE_RE = re.compile(r"\s+")
+# Script/style elements are dropped with their contents; every other tag
+# (including tables, spoilers, and unclosed/broken tags) is replaced by a space.
+_HTML_INVISIBLE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 DEFAULT_LOG_FILE = Path("data/app.log")
+
+
+def clean_html(html_text: str) -> str:
+    """Strip HTML markup and return pure text (regex-based, zero-dependency).
+
+    Removes script/style blocks entirely, replaces all remaining tags with
+    spaces (so adjacent table cells do not merge into one token), unescapes
+    HTML entities, and collapses redundant whitespace.
+
+    Args:
+        html_text: Raw HTML string (plain text passes through unchanged).
+
+    Returns:
+        Cleaned plain-text string.
+    """
+    text = _HTML_INVISIBLE_RE.sub(" ", html_text)
+    text = _HTML_TAG_RE.sub(" ", text)
+    text = html.unescape(text)
+    return _WHITESPACE_RE.sub(" ", text).strip()
 
 
 def normalize_text(text: str) -> str:
@@ -84,47 +108,52 @@ def setup_logger(
     return logger
 
 
-def average_precision_at_k(relevant: set[int], predicted: list[int], k: int = 10) -> float:
+def average_precision_at_10(predicted: list[int], relevant: list[int], k: int = 10) -> float:
     """Average Precision at ``k`` for a single query.
 
-    AP@k = (1 / min(|relevant|, k)) * sum_{i=1..k} P(i) * rel(i), where
-    ``P(i)`` is precision at cutoff ``i`` and ``rel(i)`` indicates whether
-    the item at rank ``i`` is relevant.
+    AP@k = (1 / min(|relevant|, k)) * sum over ranks i where the item is
+    relevant of precision@i. Rewards placing all relevant articles as high
+    as possible within the top ``k``.
 
     Args:
-        relevant: Ground-truth relevant document ids.
-        predicted: Ranked predicted document ids (best first).
+        predicted: Ranked predicted article ids (best first).
+        relevant: Ground-truth relevant article ids.
         k: Rank cutoff.
 
     Returns:
         AP@k in [0, 1]; 0.0 when ``relevant`` is empty.
     """
-    raise NotImplementedError
+    relevant_set = set(relevant)
+    if not relevant_set:
+        return 0.0
+    hits = 0
+    precision_sum = 0.0
+    for rank, article_id in enumerate(predicted[:k], start=1):
+        if article_id in relevant_set:
+            hits += 1
+            precision_sum += hits / rank
+    return precision_sum / min(len(relevant_set), k)
 
 
-def map_at_k(
-    ground_truth: dict[int, set[int]],
-    predictions: dict[int, list[int]],
-    k: int = 10,
-) -> float:
-    """Mean Average Precision at ``k`` over a query set (MAP@10 by default).
+def calculate_map_at_10(predictions: list[list[int]], ground_truths: list[list[int]]) -> float:
+    """Mean Average Precision at 10 over a query set.
 
     Args:
-        ground_truth: Query id -> set of relevant document ids.
-        predictions: Query id -> ranked predicted document ids.
-        k: Rank cutoff.
+        predictions: Per-query ranked predicted article ids (best first).
+        ground_truths: Per-query relevant article ids, aligned with ``predictions``.
 
     Returns:
-        Mean of AP@k over all queries present in ``ground_truth``; queries
-        missing from ``predictions`` contribute 0.
+        Mean of AP@10 over all queries; 0.0 for an empty input.
+
+    Raises:
+        ValueError: If the two lists have different lengths.
     """
-    raise NotImplementedError
-
-
-def set_seed(seed: int) -> None:
-    """Seed Python, NumPy, and PyTorch RNGs for reproducibility.
-
-    Args:
-        seed: Seed value.
-    """
-    raise NotImplementedError
+    if len(predictions) != len(ground_truths):
+        raise ValueError(f"Got {len(predictions)} predictions for {len(ground_truths)} ground truths")
+    if not predictions:
+        return 0.0
+    ap_sum = sum(
+        average_precision_at_10(predicted, relevant)
+        for predicted, relevant in zip(predictions, ground_truths, strict=True)
+    )
+    return ap_sum / len(predictions)
