@@ -17,6 +17,7 @@ dependencies = [
     "pyarrow>=16.0.0",
     "tqdm>=4.66.0",
     "pydantic>=2.13.4",
+    "html2text>=2025.4.15",
 ]
 
 [project.optional-dependencies]

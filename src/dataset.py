@@ -1,9 +1,9 @@
 """Data management layer: article loading, validation, and text enrichment.
 
-Pipeline: Feather/JSON articles -> HTML cleaning -> pydantic validation ->
-enriched text (title boosting) -> normalized token corpus for lexical (BM25)
-and semantic indexing. Also hosts the shared Feather table loader used for
-the calibration and test query sets.
+Pipeline: Feather/JSON articles -> HTML-to-Markdown conversion -> pydantic
+validation -> enriched text (title boosting) -> normalized token corpus for
+lexical (BM25) and semantic indexing. Also hosts the shared Feather table
+loader used for the calibration and test query sets.
 """
 
 from __future__ import annotations
@@ -18,13 +18,15 @@ from pathlib import Path
 import pandas as pd
 from pydantic import BaseModel
 
-from src.utils import clean_html, tokenize
+from src.utils import html_to_markdown, tokenize
 
 logger = logging.getLogger("rag.dataset")
 
-# The title is repeated this many times at the start of the enriched text so
-# title words carry more weight in both BM25 term frequencies and embeddings.
-TITLE_BOOST_REPEATS = 3
+# Title-boosted document template fed to both BM25 tokenization and the
+# bi-encoder: the title appears twice (as "Title" and "Topic") so its words
+# carry more weight in term frequencies and embeddings, and the field markers
+# give the encoder an explicit document structure.
+ENRICHED_TEXT_TEMPLATE = "Title: {title} | Topic: {title} | Content: {body}"
 
 
 class Article(BaseModel):
@@ -151,11 +153,12 @@ class ArticleDataset:
         logger.info("Loaded %d articles from %s", len(self.articles), path)
 
     def load_from_feather(self, file_path: str | Path) -> None:
-        """Load articles from a Feather file, cleaning the HTML ``body`` column.
+        """Load articles from a Feather file, converting the HTML ``body`` to Markdown.
 
         Expects ``article_id``, ``title``, and ``body`` columns; ``body`` is
-        passed through :func:`src.utils.clean_html` before validation, so the
-        indexing corpuses are built over pure text.
+        passed through :func:`src.utils.html_to_markdown` before validation,
+        so the indexing corpuses are built over structured Markdown text
+        (lists and tables keep their layout).
 
         Args:
             file_path: Path to the articles ``.f`` file.
@@ -170,24 +173,23 @@ class ArticleDataset:
             Article(
                 article_id=int(row.article_id),
                 title=str(row.title),
-                text=clean_html(str(row.body)),
+                text=html_to_markdown(str(row.body)),
             )
             for row in df.itertuples(index=False)
         ]
-        logger.info("Parsed %d articles (HTML stripped) from %s", len(self.articles), file_path)
+        logger.info("Parsed %d articles (HTML -> Markdown) from %s", len(self.articles), file_path)
 
     def get_enriched_text(self, article: Article) -> str:
-        """Concatenate title and body, repeating the title to boost its weight.
+        """Render the title-boosted document string fed to both indexes.
 
         Args:
             article: Validated article.
 
         Returns:
-            ``title`` repeated :data:`TITLE_BOOST_REPEATS` times followed by
-            the article text.
+            :data:`ENRICHED_TEXT_TEMPLATE` filled with the article's title
+            (twice) and its Markdown body.
         """
-        title_block = " ".join([article.title] * TITLE_BOOST_REPEATS)
-        return f"{title_block} {article.text}".strip()
+        return ENRICHED_TEXT_TEMPLATE.format(title=article.title, body=article.text)
 
     def get_enriched_corpus(self) -> list[str]:
         """Enriched text of every article, in storage order (for dense encoding).

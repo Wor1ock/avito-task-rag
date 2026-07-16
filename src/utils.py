@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import html
 import logging
 import random
 import re
 import sys
 from pathlib import Path
 
+import html2text
 import numpy as np
 import torch
 
@@ -16,31 +16,44 @@ import torch
 # Unicode-aware, so Cyrillic is preserved) and not whitespace — i.e. punctuation.
 _PUNCTUATION_RE = re.compile(r"[^\w\s]+")
 _WHITESPACE_RE = re.compile(r"\s+")
-# Script/style elements are dropped with their contents; every other tag
-# (including tables, spoilers, and unclosed/broken tags) is replaced by a space.
+# Script/style elements are dropped with their contents before the Markdown
+# conversion, which would otherwise leak their text into the output.
 _HTML_INVISIBLE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
-_HTML_TAG_RE = re.compile(r"<[^>]+>")
+# Three or more consecutive newlines collapse to one blank line.
+_EXCESS_NEWLINES_RE = re.compile(r"\n{3,}")
 
 DEFAULT_LOG_FILE = Path("data/app.log")
 
 
-def clean_html(html_text: str) -> str:
-    """Strip HTML markup and return pure text (regex-based, zero-dependency).
+def _build_markdown_converter() -> html2text.HTML2Text:
+    """Fresh html2text converter (the handler is stateful, so one per call)."""
+    converter = html2text.HTML2Text()
+    converter.body_width = 0  # no hard line wrapping mid-sentence
+    converter.ignore_links = True  # keep anchor text, drop URLs (index noise)
+    converter.ignore_images = True
+    converter.ignore_emphasis = True  # drop */_ markers; keep headers/lists/tables
+    converter.ul_item_mark = "-"
+    return converter
 
-    Removes script/style blocks entirely, replaces all remaining tags with
-    spaces (so adjacent table cells do not merge into one token), unescapes
-    HTML entities, and collapses redundant whitespace.
+
+def html_to_markdown(html_text: str) -> str:
+    """Convert article HTML to Markdown, preserving list and table layout.
+
+    Script/style blocks are removed with their contents, then html2text
+    renders the remaining markup as Markdown: headers, bullet/numbered lists,
+    and tables keep their structure (one item/row per line) instead of being
+    flattened into a single undifferentiated line. HTML entities are unescaped
+    by the converter.
 
     Args:
         html_text: Raw HTML string (plain text passes through unchanged).
 
     Returns:
-        Cleaned plain-text string.
+        Markdown-formatted plain-text string.
     """
     text = _HTML_INVISIBLE_RE.sub(" ", html_text)
-    text = _HTML_TAG_RE.sub(" ", text)
-    text = html.unescape(text)
-    return _WHITESPACE_RE.sub(" ", text).strip()
+    markdown = _build_markdown_converter().handle(text)
+    return _EXCESS_NEWLINES_RE.sub("\n\n", markdown).strip()
 
 
 def normalize_text(text: str) -> str:
