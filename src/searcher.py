@@ -1,143 +1,140 @@
-"""Hybrid retrieval: BM25 + dense FAISS candidates fused with Reciprocal Rank Fusion.
+"""Multi-stage hybrid retrieval: BM25 + FAISS candidates re-ranked by a cross-encoder.
 
 Pipeline per query:
 
-    1. Retrieve ``top_k_candidates`` chunk ids from BM25 and from FAISS.
-    2. Fuse the two ranked lists with RRF (per-retriever weights).
-    3. Aggregate chunk scores to document level (max over a document's chunks).
-    4. Optionally re-rank the fused candidates with a cross-encoder.
-    5. Return the ``top_k_final`` document ids.
+    1. Lexical: tokenize the query and take the top BM25 candidates.
+    2. Semantic: encode/normalize the query and search the FAISS index.
+    3. Fusion: union the two candidate sets (deduplicated corpus indices).
+    4. Reranking: score (query, enriched document) pairs with a cross-encoder.
+    5. Final ranking: sort by cross-encoder score, return top article_ids.
 """
 
 from __future__ import annotations
 
-from src.indexer import BM25Indexer, FaissIndexer
+import logging
+import pickle
+import time
+from pathlib import Path
+
+import faiss
+import numpy as np
+from sentence_transformers import CrossEncoder
+
+from src.dataset import ArticleDataset
+from src.indexer import BM25_FILENAME, DEFAULT_EMBEDDING_MODEL, FAISS_FILENAME, HybridIndexer
+from src.utils import tokenize
+
+logger = logging.getLogger("rag.searcher")
+
+DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-base"
 
 
 class HybridSearcher:
-    """Combines a sparse and a dense retriever with weighted RRF fusion."""
+    """Combines lexical and semantic retrieval with cross-encoder re-ranking."""
 
     def __init__(
         self,
-        bm25_indexer: BM25Indexer,
-        faiss_indexer: FaissIndexer,
-        chunk_to_doc: dict[int, int],
-        rrf_k: int = 60,
-        bm25_weight: float = 0.5,
-        dense_weight: float = 0.5,
+        dataset: ArticleDataset,
+        index_dir: str = "data/",
+        model_name: str = DEFAULT_EMBEDDING_MODEL,
+        reranker_name: str = DEFAULT_RERANKER_MODEL,
+        device: str | None = None,
     ) -> None:
         """
         Args:
-            bm25_indexer: Fitted sparse retriever.
-            faiss_indexer: Fitted dense retriever.
-            chunk_to_doc: Mapping from chunk id to source document id.
-            rrf_k: RRF smoothing constant (rank offset).
-            bm25_weight: Weight of the BM25 ranked list in the fusion.
-            dense_weight: Weight of the dense ranked list in the fusion.
+            dataset: Loaded article dataset (source of candidate texts; must be
+                the same corpus, in the same order, the indexes were built on).
+            index_dir: Directory holding the saved BM25/FAISS artifacts.
+            model_name: Bi-encoder checkpoint (must match the one used at build time).
+            reranker_name: Cross-encoder checkpoint for re-ranking.
+            device: Torch device for both models; auto-detected when None.
         """
-        self.bm25_indexer = bm25_indexer
-        self.faiss_indexer = faiss_indexer
-        self.chunk_to_doc = chunk_to_doc
-        self.rrf_k = rrf_k
-        self.bm25_weight = bm25_weight
-        self.dense_weight = dense_weight
+        self.dataset = dataset
+        self.index_dir = Path(index_dir)
+        self.reranker_name = reranker_name
+        self.device = device
+        # Reuse the indexer's lazy encoder so query vectors get the same
+        # normalization as the corpus vectors.
+        self._encoder = HybridIndexer(model_name=model_name, device=device)
+        self.bm25 = None
+        self.faiss_index: faiss.Index | None = None
+        self.article_ids: list[int] = []
+        self._enriched_corpus: list[str] = []
+        self.reranker: CrossEncoder | None = None
+        self.load_index()
 
-    def _search_bm25(self, query: str, top_k: int) -> list[int]:
-        """Return the top ``top_k`` chunk ids by BM25 score.
+    def load_index(self) -> None:
+        """Load persisted artifacts and initialize both models.
+
+        Raises:
+            FileNotFoundError: If the BM25 or FAISS artifact is missing.
+            ValueError: If the dataset's article order does not match the
+                ``article_ids`` mapping the indexes were built with.
+        """
+        bm25_path = self.index_dir / BM25_FILENAME
+        faiss_path = self.index_dir / FAISS_FILENAME
+        with bm25_path.open("rb") as f:
+            payload = pickle.load(f)
+        self.bm25 = payload["bm25"]
+        self.article_ids = payload["article_ids"]
+        self.faiss_index = faiss.read_index(str(faiss_path))
+        logger.info(
+            "Loaded BM25 (%d docs) and FAISS (%d vectors) from %s",
+            self.bm25.corpus_size,
+            self.faiss_index.ntotal,
+            self.index_dir,
+        )
+
+        dataset_ids = [article.article_id for article in self.dataset.articles]
+        if dataset_ids != self.article_ids:
+            raise ValueError("Dataset article order does not match the saved index mapping; rebuild the index")
+        self._enriched_corpus = self.dataset.get_enriched_corpus()
+
+        start = time.perf_counter()
+        self.reranker = CrossEncoder(self.reranker_name, device=self.device)
+        logger.info("Loaded reranker %s in %.1fs", self.reranker_name, time.perf_counter() - start)
+
+    def _search_lexical(self, query: str, top_k: int) -> list[int]:
+        """Top ``top_k`` corpus indices by BM25 score (decreasing)."""
+        scores = self.bm25.get_scores(tokenize(query))
+        top_k = min(top_k, len(scores))
+        return np.argsort(scores)[::-1][:top_k].tolist()
+
+    def _search_semantic(self, query: str, top_k: int) -> list[int]:
+        """Top ``top_k`` corpus indices by cosine similarity (decreasing)."""
+        query_vec = self._encoder.encode([query])
+        top_k = min(top_k, self.faiss_index.ntotal)
+        _, indices = self.faiss_index.search(query_vec, top_k)
+        return [int(i) for i in indices[0] if i != -1]
+
+    def search(self, query: str, top_k_candidates: int = 30, top_k_final: int = 10) -> list[int]:
+        """Run the full multi-stage pipeline for a single query.
 
         Args:
             query: Raw query text.
-            top_k: Number of candidates to return.
+            top_k_candidates: Candidates fetched per first-stage retriever.
+            top_k_final: Number of article ids in the final ranking.
 
         Returns:
-            Chunk ids ordered by decreasing BM25 score.
+            ``article_id`` list ordered by decreasing cross-encoder relevance,
+            length <= ``top_k_final``.
         """
-        raise NotImplementedError
+        start = time.perf_counter()
+        lexical = self._search_lexical(query, top_k_candidates)
+        semantic = self._search_semantic(query, top_k_candidates)
 
-    def _search_dense(self, query: str, top_k: int) -> list[int]:
-        """Return the top ``top_k`` chunk ids by embedding similarity.
+        # Sorted for a deterministic reranker input order.
+        candidates = sorted(set(lexical) | set(semantic))
+        pairs = [[query, self._enriched_corpus[idx]] for idx in candidates]
+        ce_scores = self.reranker.predict(pairs, show_progress_bar=False)
 
-        Args:
-            query: Raw query text.
-            top_k: Number of candidates to return.
-
-        Returns:
-            Chunk ids ordered by decreasing inner-product similarity.
-        """
-        raise NotImplementedError
-
-    def _rrf_fuse(self, ranked_lists: list[tuple[list[int], float]]) -> dict[int, float]:
-        """Fuse ranked candidate lists with weighted Reciprocal Rank Fusion.
-
-        For each item at (0-based) rank ``r`` in a list with weight ``w``,
-        its contribution is ``w / (rrf_k + r + 1)``; contributions are summed
-        across lists.
-
-        Args:
-            ranked_lists: Pairs of (ranked chunk ids, list weight).
-
-        Returns:
-            Mapping from chunk id to fused RRF score.
-        """
-        raise NotImplementedError
-
-    def _aggregate_to_documents(self, chunk_scores: dict[int, float]) -> dict[int, float]:
-        """Collapse chunk-level scores to document level.
-
-        A document's score is the maximum score among its chunks.
-
-        Args:
-            chunk_scores: Fused chunk id -> score mapping.
-
-        Returns:
-            Document id -> score mapping.
-        """
-        raise NotImplementedError
-
-    def rerank(self, query: str, doc_ids: list[int], top_k: int) -> list[int]:
-        """Re-rank candidate documents with a cross-encoder (placeholder).
-
-        The baseline returns the input order truncated to ``top_k``; a real
-        implementation should score (query, document) pairs with a
-        cross-encoder and sort by that score.
-
-        Args:
-            query: Raw query text.
-            doc_ids: Candidate document ids from the fusion stage.
-            top_k: Number of documents to keep.
-
-        Returns:
-            Re-ranked document ids, length <= ``top_k``.
-        """
-        raise NotImplementedError
-
-    def search(self, query: str, top_k_candidates: int = 100, top_k_final: int = 10) -> list[int]:
-        """Run the full hybrid retrieval pipeline for a single query.
-
-        Args:
-            query: Raw query text.
-            top_k_candidates: Candidates per first-stage retriever.
-            top_k_final: Documents in the final ranked answer.
-
-        Returns:
-            Ranked document ids, length <= ``top_k_final``.
-        """
-        raise NotImplementedError
-
-    def search_batch(
-        self,
-        queries: list[str],
-        top_k_candidates: int = 100,
-        top_k_final: int = 10,
-    ) -> list[list[int]]:
-        """Vectorized/batched variant of :meth:`search` for many queries.
-
-        Args:
-            queries: Raw query texts.
-            top_k_candidates: Candidates per first-stage retriever.
-            top_k_final: Documents in each final ranked answer.
-
-        Returns:
-            One ranked document id list per query, in input order.
-        """
-        raise NotImplementedError
+        ranked = sorted(zip(candidates, ce_scores, strict=True), key=lambda item: item[1], reverse=True)
+        result = [self.article_ids[idx] for idx, _ in ranked[:top_k_final]]
+        logger.info(
+            "Query served in %.2fs (%d lexical + %d semantic -> %d unique candidates)",
+            time.perf_counter() - start,
+            len(lexical),
+            len(semantic),
+            len(candidates),
+        )
+        return result
