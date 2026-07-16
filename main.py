@@ -20,7 +20,7 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 
 from src.config import AppConfig
-from src.dataset import ArticleDataset, load_feather_table
+from src.dataset import ArticleDataset, load_feather_table, sample_table
 from src.indexer import HybridIndexer
 from src.predict import predict
 from src.searcher import HybridSearcher
@@ -114,6 +114,12 @@ def run_validation(searcher: HybridSearcher, config: AppConfig) -> None:
     calibration = load_feather_table(
         config.path.calibration, required_columns=("query_id", "query_text", "ground_truth")
     )
+    calibration = sample_table(
+        calibration,
+        sample_frac=config.sampling.sample_frac,
+        sample_size=config.sampling.sample_size,
+        random_state=config.sampling.random_state,
+    )
     predictions_table = predict(
         calibration,
         searcher,
@@ -143,6 +149,12 @@ def run_test(searcher: HybridSearcher, config: AppConfig) -> None:
         config: Validated application config (test path, submission path, top_k settings).
     """
     test = load_feather_table(config.path.test, required_columns=("query_id", "query_text"))
+    test = sample_table(
+        test,
+        sample_frac=config.sampling.sample_frac,
+        sample_size=config.sampling.sample_size,
+        random_state=config.sampling.random_state,
+    )
     submission = predict(
         test,
         searcher,

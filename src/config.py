@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class PathConfig(BaseModel):
@@ -53,6 +53,20 @@ class RerankerConfig(BaseModel):
     model_name: str | None = None
 
 
+class SamplingConfig(BaseModel):
+    """Reproducible subsampling of the calibration/test query sets."""
+
+    sample_frac: float | None = Field(default=None, gt=0, le=1)
+    sample_size: int | None = Field(default=None, gt=0)
+    random_state: int = 42
+
+    @model_validator(mode="after")
+    def _at_most_one_mode(self) -> SamplingConfig:
+        if self.sample_frac is not None and self.sample_size is not None:
+            raise ValueError("Set at most one of sample_frac or sample_size, not both")
+        return self
+
+
 class AppConfig(BaseModel):
     """Root config composed by Hydra from ``configs/config.yaml``."""
 
@@ -62,4 +76,5 @@ class AppConfig(BaseModel):
     top_k_final: int = Field(gt=0)
     hybrid: HybridConfig
     reranker: RerankerConfig
+    sampling: SamplingConfig
     seed: int

@@ -23,6 +23,15 @@ reranker:
   enabled: false
   model_name: null
 
+# Reproducible subsampling of the calibration/test query sets for faster
+# iteration. Set at most one of sample_frac (0 < f <= 1) or sample_size;
+# null for both disables sampling. random_state pins the selected rows so
+# validation numbers stay comparable across runs.
+sampling:
+  sample_frac: null
+  sample_size: null
+  random_state: 42
+
 seed: 42
 
 hydra:

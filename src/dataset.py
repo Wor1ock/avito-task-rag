@@ -79,6 +79,49 @@ def load_feather_table(file_path: str | Path, required_columns: Sequence[str]) -
     return df
 
 
+def sample_table(
+    df: pd.DataFrame,
+    sample_frac: float | None = None,
+    sample_size: int | None = None,
+    random_state: int = 42,
+) -> pd.DataFrame:
+    """Reproducibly subsample a query table (calibration/test) for faster runs.
+
+    A fixed ``random_state`` guarantees the same rows are selected on every
+    run, so validation numbers stay comparable across iterations. Row order
+    of the original table is preserved. Never apply this to the articles
+    corpus — the persisted indexes cover the full corpus.
+
+    Args:
+        df: Table to subsample.
+        sample_frac: Fraction of rows to keep, in (0, 1]. Ignored when
+            ``sample_size`` is given.
+        sample_size: Absolute number of rows to keep (capped at ``len(df)``);
+            takes precedence over ``sample_frac``.
+        random_state: Seed for pandas' sampler.
+
+    Returns:
+        The sampled table with a reset index, or ``df`` unchanged when both
+        ``sample_frac`` and ``sample_size`` are None.
+    """
+    if sample_frac is None and sample_size is None:
+        return df
+    if sample_size is not None:
+        sampled = df.sample(n=min(sample_size, len(df)), random_state=random_state)
+    else:
+        sampled = df.sample(frac=sample_frac, random_state=random_state)
+    sampled = sampled.sort_index().reset_index(drop=True)
+    logger.info(
+        "Sampled %d of %d rows (frac=%s, size=%s, random_state=%d)",
+        len(sampled),
+        len(df),
+        sample_frac,
+        sample_size,
+        random_state,
+    )
+    return sampled
+
+
 class ArticleDataset:
     """In-memory article store with validation and enrichment helpers."""
 
