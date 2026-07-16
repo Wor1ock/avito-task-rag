@@ -44,9 +44,10 @@ class HybridSearcher:
         encoder: HybridIndexer,
         bm25_path: str | Path,
         faiss_path: str | Path,
-        rrf_k: float = 60.0,
-        bm25_weight: float = 0.5,
-        dense_weight: float = 0.5,
+        *,
+        rrf_k: float,
+        bm25_weight: float,
+        dense_weight: float,
         reranker_enabled: bool = False,
         reranker_name: str | None = None,
         device: str | None = None,
@@ -59,9 +60,9 @@ class HybridSearcher:
                 identically to the one that built the FAISS index.
             bm25_path: Persisted BM25 artifact (pickled index + article_ids).
             faiss_path: Persisted FAISS index.
-            rrf_k: Reciprocal Rank Fusion constant.
-            bm25_weight: RRF weight of the lexical ranking.
-            dense_weight: RRF weight of the semantic ranking.
+            rrf_k: Reciprocal Rank Fusion constant (``hybrid.rrf_k``).
+            bm25_weight: RRF weight of the lexical ranking (``hybrid.bm25_weight``).
+            dense_weight: RRF weight of the semantic ranking (``hybrid.dense_weight``).
             reranker_enabled: Whether to re-rank fused candidates with a
                 cross-encoder.
             reranker_name: Cross-encoder checkpoint; defaults to
