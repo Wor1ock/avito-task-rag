@@ -116,7 +116,10 @@ class HybridSearcher:
 
         if self.reranker_enabled:
             start = time.perf_counter()
-            self.reranker = CrossEncoder(self.reranker_name, device=self.device)
+            # max_length caps the (query, document) pair at 512 tokens: without
+            # it the tokenizer pads/attends up to the model maximum (8192 for
+            # bge-reranker-v2-m3), which is prohibitively slow on CPU.
+            self.reranker = CrossEncoder(self.reranker_name, device=self.device, max_length=512)
             logger.info("Loaded reranker %s in %.1fs", self.reranker_name, time.perf_counter() - start)
         else:
             logger.info("Reranker disabled: final ranking uses RRF fusion scores")
