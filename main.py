@@ -17,13 +17,12 @@ from __future__ import annotations
 import logging
 
 import hydra
-import pandas as pd
 from omegaconf import DictConfig, OmegaConf
-from tqdm import tqdm
 
 from src.config import AppConfig
 from src.dataset import ArticleDataset, load_feather_table
 from src.indexer import HybridIndexer
+from src.predict import predict
 from src.searcher import HybridSearcher
 from src.utils import calculate_map_at_10, set_seed, setup_logger
 
@@ -115,14 +114,17 @@ def run_validation(searcher: HybridSearcher, config: AppConfig) -> None:
     calibration = load_feather_table(
         config.path.calibration, required_columns=("query_id", "query_text", "ground_truth")
     )
-    predictions: list[list[int]] = []
-    ground_truths: list[list[int]] = []
-    for row in tqdm(calibration.itertuples(index=False), total=len(calibration), desc="calibration"):
-        ranked = searcher.search(
-            str(row.query_text), top_k_candidates=config.top_k_candidates, top_k_final=config.top_k_final
-        )
-        predictions.append(ranked)
-        ground_truths.append([int(token) for token in str(row.ground_truth).split()])
+    predictions_table = predict(
+        calibration,
+        searcher,
+        top_k=config.top_k_final,
+        top_k_candidates=config.top_k_candidates,
+        desc="calibration",
+    )
+    # Parse the submission-format answer strings back into id lists, mirroring
+    # how the official scorer reads answer.csv (same serialize -> parse round-trip).
+    predictions = [[int(token) for token in answer.split()] for answer in predictions_table["answer"]]
+    ground_truths = [[int(token) for token in str(truth).split()] for truth in calibration["ground_truth"]]
     score = calculate_map_at_10(predictions, ground_truths)
     logger.info("Calibration MAP@10 over %d queries: %.4f", len(calibration), score)
     print(f"MAP@10 on calibration ({len(calibration)} queries): {score:.4f}")
@@ -136,16 +138,13 @@ def run_test(searcher: HybridSearcher, config: AppConfig) -> None:
         config: Validated application config (test path, submission path, top_k settings).
     """
     test = load_feather_table(config.path.test, required_columns=("query_id", "query_text"))
-    answers: list[str] = []
-    for row in tqdm(test.itertuples(index=False), total=len(test), desc="test"):
-        ranked = searcher.search(
-            str(row.query_text), top_k_candidates=config.top_k_candidates, top_k_final=config.top_k_final
-        )
-        # Defensive dedup (order-preserving); the searcher already returns unique ids.
-        unique_ranked = list(dict.fromkeys(ranked))
-        answers.append(" ".join(str(article_id) for article_id in unique_ranked))
-
-    submission = pd.DataFrame({"query_id": test["query_id"].astype(int), "answer": answers})
+    submission = predict(
+        test,
+        searcher,
+        top_k=config.top_k_final,
+        top_k_candidates=config.top_k_candidates,
+        desc="test",
+    )
     if len(submission) != len(test):
         raise RuntimeError(f"Submission has {len(submission)} rows for {len(test)} test queries")
     config.path.submission.parent.mkdir(parents=True, exist_ok=True)
