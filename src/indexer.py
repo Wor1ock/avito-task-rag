@@ -21,8 +21,6 @@ from src.dataset import ArticleDataset
 logger = logging.getLogger("rag.indexer")
 
 DEFAULT_EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-BM25_FILENAME = "bm25.pkl"
-FAISS_FILENAME = "faiss.index"
 
 
 class HybridIndexer:
@@ -37,16 +35,23 @@ class HybridIndexer:
         model_name: str = DEFAULT_EMBEDDING_MODEL,
         batch_size: int = 64,
         device: str | None = None,
+        max_seq_length: int | None = None,
+        normalize_embeddings: bool = True,
     ) -> None:
         """
         Args:
             model_name: sentence-transformers bi-encoder checkpoint.
             batch_size: Encoding batch size.
             device: Torch device ("cpu"/"cuda"); auto-detected when None.
+            max_seq_length: Encoder input truncation length; model default when None.
+            normalize_embeddings: L2-normalize embeddings so inner product in
+                :class:`faiss.IndexFlatIP` equals cosine similarity.
         """
         self.model_name = model_name
         self.batch_size = batch_size
         self.device = device
+        self.max_seq_length = max_seq_length
+        self.normalize_embeddings = normalize_embeddings
         self.model: SentenceTransformer | None = None
         self.bm25: BM25Okapi | None = None
         self.faiss_index: faiss.Index | None = None
@@ -57,19 +62,22 @@ class HybridIndexer:
         if self.model is None:
             start = time.perf_counter()
             self.model = SentenceTransformer(self.model_name, device=self.device)
+            if self.max_seq_length is not None:
+                self.model.max_seq_length = self.max_seq_length
             logger.info("Loaded embedding model %s in %.1fs", self.model_name, time.perf_counter() - start)
         return self.model
 
     def encode(self, texts: list[str], show_progress: bool = False) -> np.ndarray:
-        """Encode texts into an L2-normalized float32 matrix (rows: cosine-ready).
+        """Encode texts into a float32 matrix, L2-normalized when configured.
 
         Args:
             texts: Texts to embed (corpus or queries).
             show_progress: Whether to display an encoding progress bar.
 
         Returns:
-            Array of shape ``(len(texts), dim)`` with unit-norm rows, so inner
-            product in :class:`faiss.IndexFlatIP` equals cosine similarity.
+            Array of shape ``(len(texts), dim)``; with unit-norm rows when
+            :attr:`normalize_embeddings` is enabled, so inner product in
+            :class:`faiss.IndexFlatIP` equals cosine similarity.
         """
         model = self._load_model()
         embeddings = model.encode(
@@ -78,7 +86,8 @@ class HybridIndexer:
             convert_to_numpy=True,
             show_progress_bar=show_progress,
         ).astype(np.float32)
-        faiss.normalize_L2(embeddings)
+        if self.normalize_embeddings:
+            faiss.normalize_L2(embeddings)
         return embeddings
 
     def build_index(self, dataset: ArticleDataset) -> None:
@@ -110,26 +119,24 @@ class HybridIndexer:
             time.perf_counter() - start,
         )
 
-    def save(self, output_dir: str = "data/") -> None:
+    def save(self, bm25_path: str | Path, faiss_path: str | Path) -> None:
         """Persist both indexes and the article id mapping.
 
-        Writes ``bm25.pkl`` (pickled BM25 + article_ids) and ``faiss.index``
-        into ``output_dir``.
-
         Args:
-            output_dir: Destination directory (created if missing).
+            bm25_path: Destination for the pickled BM25 index + article_ids.
+            faiss_path: Destination for the serialized FAISS index.
 
         Raises:
             RuntimeError: If :meth:`build_index` has not been called.
         """
         if self.bm25 is None or self.faiss_index is None:
             raise RuntimeError("Nothing to save: call build_index() first")
-        out = Path(output_dir)
-        out.mkdir(parents=True, exist_ok=True)
+        bm25_path = Path(bm25_path)
+        faiss_path = Path(faiss_path)
+        bm25_path.parent.mkdir(parents=True, exist_ok=True)
+        faiss_path.parent.mkdir(parents=True, exist_ok=True)
 
-        bm25_path = out / BM25_FILENAME
         with bm25_path.open("wb") as f:
             pickle.dump({"bm25": self.bm25, "article_ids": self.article_ids}, f)
-        faiss_path = out / FAISS_FILENAME
         faiss.write_index(self.faiss_index, str(faiss_path))
         logger.info("Saved BM25 index to %s and FAISS index to %s", bm25_path, faiss_path)

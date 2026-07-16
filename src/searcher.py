@@ -1,12 +1,14 @@
-"""Multi-stage hybrid retrieval: BM25 + FAISS candidates re-ranked by a cross-encoder.
+"""Multi-stage hybrid retrieval: BM25 + FAISS fused via weighted Reciprocal Rank Fusion.
 
 Pipeline per query:
 
     1. Lexical: tokenize the query and take the top BM25 candidates.
     2. Semantic: encode/normalize the query and search the FAISS index.
-    3. Fusion: union the two candidate sets (deduplicated corpus indices).
-    4. Reranking: score (query, enriched document) pairs with a cross-encoder.
-    5. Final ranking: sort by cross-encoder score, return top article_ids.
+    3. Fusion: weighted RRF over both rankings
+       (``score = sum(weight / (rrf_k + rank))``).
+    4. Optional reranking: when enabled, score (query, enriched document)
+       pairs with a cross-encoder and re-sort the fused candidates.
+    5. Final ranking: top article_ids by fused (or reranker) score.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ import numpy as np
 from sentence_transformers import CrossEncoder
 
 from src.dataset import ArticleDataset
-from src.indexer import BM25_FILENAME, DEFAULT_EMBEDDING_MODEL, FAISS_FILENAME, HybridIndexer
+from src.indexer import HybridIndexer
 from src.utils import tokenize
 
 logger = logging.getLogger("rag.searcher")
@@ -30,32 +32,52 @@ DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-base"
 
 
 class HybridSearcher:
-    """Combines lexical and semantic retrieval with cross-encoder re-ranking."""
+    """Combines lexical and semantic retrieval with weighted RRF fusion.
+
+    A cross-encoder re-ranking stage over the fused candidates is applied only
+    when ``reranker_enabled`` is set.
+    """
 
     def __init__(
         self,
         dataset: ArticleDataset,
-        index_dir: str = "data/",
-        model_name: str = DEFAULT_EMBEDDING_MODEL,
-        reranker_name: str = DEFAULT_RERANKER_MODEL,
+        encoder: HybridIndexer,
+        bm25_path: str | Path,
+        faiss_path: str | Path,
+        rrf_k: float = 60.0,
+        bm25_weight: float = 0.5,
+        dense_weight: float = 0.5,
+        reranker_enabled: bool = False,
+        reranker_name: str | None = None,
         device: str | None = None,
     ) -> None:
         """
         Args:
             dataset: Loaded article dataset (source of candidate texts; must be
                 the same corpus, in the same order, the indexes were built on).
-            index_dir: Directory holding the saved BM25/FAISS artifacts.
-            model_name: Bi-encoder checkpoint (must match the one used at build time).
-            reranker_name: Cross-encoder checkpoint for re-ranking.
-            device: Torch device for both models; auto-detected when None.
+            encoder: Indexer whose bi-encoder encodes queries; must be configured
+                identically to the one that built the FAISS index.
+            bm25_path: Persisted BM25 artifact (pickled index + article_ids).
+            faiss_path: Persisted FAISS index.
+            rrf_k: Reciprocal Rank Fusion constant.
+            bm25_weight: RRF weight of the lexical ranking.
+            dense_weight: RRF weight of the semantic ranking.
+            reranker_enabled: Whether to re-rank fused candidates with a
+                cross-encoder.
+            reranker_name: Cross-encoder checkpoint; defaults to
+                :data:`DEFAULT_RERANKER_MODEL` when None and reranking is enabled.
+            device: Torch device for the reranker; auto-detected when None.
         """
         self.dataset = dataset
-        self.index_dir = Path(index_dir)
-        self.reranker_name = reranker_name
+        self.bm25_path = Path(bm25_path)
+        self.faiss_path = Path(faiss_path)
+        self.rrf_k = rrf_k
+        self.bm25_weight = bm25_weight
+        self.dense_weight = dense_weight
+        self.reranker_enabled = reranker_enabled
+        self.reranker_name = reranker_name or DEFAULT_RERANKER_MODEL
         self.device = device
-        # Reuse the indexer's lazy encoder so query vectors get the same
-        # normalization as the corpus vectors.
-        self._encoder = HybridIndexer(model_name=model_name, device=device)
+        self._encoder = encoder
         self.bm25 = None
         self.faiss_index: faiss.Index | None = None
         self.article_ids: list[int] = []
@@ -64,25 +86,26 @@ class HybridSearcher:
         self.load_index()
 
     def load_index(self) -> None:
-        """Load persisted artifacts and initialize both models.
+        """Load persisted artifacts and, when enabled, the reranker model.
 
         Raises:
             FileNotFoundError: If the BM25 or FAISS artifact is missing.
             ValueError: If the dataset's article order does not match the
                 ``article_ids`` mapping the indexes were built with.
         """
-        bm25_path = self.index_dir / BM25_FILENAME
-        faiss_path = self.index_dir / FAISS_FILENAME
-        with bm25_path.open("rb") as f:
+        with self.bm25_path.open("rb") as f:
             payload = pickle.load(f)
         self.bm25 = payload["bm25"]
         self.article_ids = payload["article_ids"]
-        self.faiss_index = faiss.read_index(str(faiss_path))
+        if not self.faiss_path.exists():
+            raise FileNotFoundError(f"FAISS index not found: {self.faiss_path}")
+        self.faiss_index = faiss.read_index(str(self.faiss_path))
         logger.info(
-            "Loaded BM25 (%d docs) and FAISS (%d vectors) from %s",
+            "Loaded BM25 (%d docs) from %s and FAISS (%d vectors) from %s",
             self.bm25.corpus_size,
+            self.bm25_path,
             self.faiss_index.ntotal,
-            self.index_dir,
+            self.faiss_path,
         )
 
         dataset_ids = [article.article_id for article in self.dataset.articles]
@@ -90,9 +113,12 @@ class HybridSearcher:
             raise ValueError("Dataset article order does not match the saved index mapping; rebuild the index")
         self._enriched_corpus = self.dataset.get_enriched_corpus()
 
-        start = time.perf_counter()
-        self.reranker = CrossEncoder(self.reranker_name, device=self.device)
-        logger.info("Loaded reranker %s in %.1fs", self.reranker_name, time.perf_counter() - start)
+        if self.reranker_enabled:
+            start = time.perf_counter()
+            self.reranker = CrossEncoder(self.reranker_name, device=self.device)
+            logger.info("Loaded reranker %s in %.1fs", self.reranker_name, time.perf_counter() - start)
+        else:
+            logger.info("Reranker disabled: final ranking uses RRF fusion scores")
 
     def _search_lexical(self, query: str, top_k: int) -> list[int]:
         """Top ``top_k`` corpus indices by BM25 score (decreasing)."""
@@ -101,13 +127,29 @@ class HybridSearcher:
         return np.argsort(scores)[::-1][:top_k].tolist()
 
     def _search_semantic(self, query: str, top_k: int) -> list[int]:
-        """Top ``top_k`` corpus indices by cosine similarity (decreasing)."""
+        """Top ``top_k`` corpus indices by inner-product similarity (decreasing)."""
         query_vec = self._encoder.encode([query])
         top_k = min(top_k, self.faiss_index.ntotal)
         _, indices = self.faiss_index.search(query_vec, top_k)
         return [int(i) for i in indices[0] if i != -1]
 
-    def search(self, query: str, top_k_candidates: int = 30, top_k_final: int = 10) -> list[int]:
+    def _fuse(self, rankings: list[tuple[float, list[int]]]) -> list[tuple[int, float]]:
+        """Weighted Reciprocal Rank Fusion over ranked corpus-index lists.
+
+        Args:
+            rankings: ``(weight, ranked_indices)`` pairs, best-first rankings.
+
+        Returns:
+            ``(corpus_index, fused_score)`` pairs sorted by decreasing score
+            (ties broken by corpus index for determinism).
+        """
+        fused: dict[int, float] = {}
+        for weight, ranking in rankings:
+            for rank, corpus_idx in enumerate(ranking, start=1):
+                fused[corpus_idx] = fused.get(corpus_idx, 0.0) + weight / (self.rrf_k + rank)
+        return sorted(fused.items(), key=lambda item: (-item[1], item[0]))
+
+    def search(self, query: str, top_k_candidates: int = 100, top_k_final: int = 10) -> list[int]:
         """Run the full multi-stage pipeline for a single query.
 
         Args:
@@ -116,7 +158,7 @@ class HybridSearcher:
             top_k_final: Number of article ids in the final ranking.
 
         Returns:
-            ``article_id`` list ordered by decreasing cross-encoder relevance,
+            ``article_id`` list ordered by decreasing relevance,
             length <= ``top_k_final``.
         """
         return [article_id for article_id, _ in self.search_with_scores(query, top_k_candidates, top_k_final)]
@@ -124,10 +166,10 @@ class HybridSearcher:
     def search_with_scores(
         self,
         query: str,
-        top_k_candidates: int = 30,
+        top_k_candidates: int = 100,
         top_k_final: int = 10,
     ) -> list[tuple[int, float]]:
-        """Like :meth:`search`, but keeps the raw cross-encoder relevance scores.
+        """Like :meth:`search`, but keeps the relevance scores.
 
         Args:
             query: Raw query text.
@@ -135,25 +177,32 @@ class HybridSearcher:
             top_k_final: Number of article ids in the final ranking.
 
         Returns:
-            ``(article_id, reranker_score)`` pairs ordered by decreasing score,
-            length <= ``top_k_final``.
+            ``(article_id, score)`` pairs ordered by decreasing score, where the
+            score is the cross-encoder relevance when reranking is enabled and
+            the fused RRF score otherwise. Length <= ``top_k_final``.
         """
         start = time.perf_counter()
         lexical = self._search_lexical(query, top_k_candidates)
         semantic = self._search_semantic(query, top_k_candidates)
+        candidates = self._fuse([(self.bm25_weight, lexical), (self.dense_weight, semantic)])
 
-        # Sorted for a deterministic reranker input order.
-        candidates = sorted(set(lexical) | set(semantic))
-        pairs = [[query, self._enriched_corpus[idx]] for idx in candidates]
-        ce_scores = self.reranker.predict(pairs, show_progress_bar=False)
+        if self.reranker is not None:
+            indices = [corpus_idx for corpus_idx, _ in candidates]
+            pairs = [[query, self._enriched_corpus[corpus_idx]] for corpus_idx in indices]
+            ce_scores = self.reranker.predict(pairs, show_progress_bar=False)
+            candidates = sorted(
+                zip(indices, (float(score) for score in ce_scores), strict=True),
+                key=lambda item: item[1],
+                reverse=True,
+            )
 
-        ranked = sorted(zip(candidates, ce_scores, strict=True), key=lambda item: item[1], reverse=True)
-        result = [(self.article_ids[idx], float(score)) for idx, score in ranked[:top_k_final]]
+        result = [(self.article_ids[corpus_idx], float(score)) for corpus_idx, score in candidates[:top_k_final]]
         logger.info(
-            "Query served in %.2fs (%d lexical + %d semantic -> %d unique candidates)",
+            "Query served in %.2fs (%d lexical + %d semantic -> %d fused candidates, reranker %s)",
             time.perf_counter() - start,
             len(lexical),
             len(semantic),
             len(candidates),
+            "on" if self.reranker is not None else "off",
         )
         return result

@@ -2,6 +2,8 @@
 defaults:
   - path: default
   - model: default
+  - override hydra/job_logging: none
+  - override hydra/hydra_logging: none
   - _self_
 
 # Number of candidates retrieved by each first-stage retriever (BM25 / FAISS).
@@ -26,3 +28,6 @@ seed: 42
 hydra:
   job:
     chdir: false
+  run:
+    dir: .
+  output_subdir: null

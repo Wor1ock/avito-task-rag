@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import html
 import logging
+import random
 import re
 import sys
 from pathlib import Path
+
+import numpy as np
+import torch
 
 # Matches any character that is not a word character (letters/digits/underscore,
 # Unicode-aware, so Cyrillic is preserved) and not whitespace — i.e. punctuation.
@@ -65,6 +69,19 @@ def tokenize(text: str) -> list[str]:
     """
     normalized = normalize_text(text)
     return normalized.split() if normalized else []
+
+
+def set_seed(seed: int) -> None:
+    """Seed the Python, NumPy, and PyTorch RNGs for reproducible runs.
+
+    Args:
+        seed: Seed value applied to all three generators.
+    """
+    random.seed(seed)
+    # Third-party libraries read NumPy's legacy global RNG state, so the
+    # legacy seeder (not a local Generator) is required here.
+    np.random.seed(seed)  # noqa: NPY002
+    torch.manual_seed(seed)
 
 
 def setup_logger(
