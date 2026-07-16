@@ -148,13 +148,9 @@ def run_test(searcher: HybridSearcher, config: AppConfig) -> None:
         searcher: Ready-to-query hybrid searcher.
         config: Validated application config (test path, submission path, top_k settings).
     """
+    # The sampling config is deliberately NOT applied here: the submission must
+    # always cover every test query, or the dropped ones score zero.
     test = load_feather_table(config.path.test, required_columns=("query_id", "query_text"))
-    test = sample_table(
-        test,
-        sample_frac=config.sampling.sample_frac,
-        sample_size=config.sampling.sample_size,
-        random_state=config.sampling.random_state,
-    )
     submission = predict(
         test,
         searcher,
