@@ -188,14 +188,20 @@ class HybridSearcher:
         candidates = self._fuse([(self.bm25_weight, lexical), (self.dense_weight, semantic)])
 
         if self.reranker is not None:
-            indices = [corpus_idx for corpus_idx, _ in candidates]
+            rerank_depth = min(15, len(candidates))
+            indices = [corpus_idx for corpus_idx, _ in candidates[:rerank_depth]]
+            remaining_candidates = candidates[rerank_depth:]
+
             pairs = [[query, self._enriched_corpus[corpus_idx]] for corpus_idx in indices]
-            ce_scores = self.reranker.predict(pairs, show_progress_bar=False)
-            candidates = sorted(
+            ce_scores = self.reranker.predict(pairs, batch_size=32, show_progress_bar=False)
+
+            reranked_candidates = sorted(
                 zip(indices, (float(score) for score in ce_scores), strict=True),
                 key=lambda item: item[1],
                 reverse=True,
             )
+
+            candidates = reranked_candidates + [(idx, score - 1000.0) for idx, score in remaining_candidates]
 
         result = [(self.article_ids[corpus_idx], float(score)) for corpus_idx, score in candidates[:top_k_final]]
         logger.info(
