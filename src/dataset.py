@@ -1,6 +1,6 @@
 """Data management layer: article loading, validation, and text enrichment.
 
-Pipeline: Feather/JSON articles -> HTML-to-Markdown conversion -> pydantic
+Pipeline: Feather articles -> HTML-to-Markdown conversion -> pydantic
 validation -> enriched text (title boosting) -> normalized token corpus for
 lexical (BM25) and semantic indexing. Also hosts the shared Feather table
 loader used for the calibration and test query sets.
@@ -8,11 +8,9 @@ loader used for the calibration and test query sets.
 
 from __future__ import annotations
 
-import json
 import logging
 import warnings
 from collections.abc import Sequence
-from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -34,21 +32,6 @@ class Article(BaseModel):
 
     article_id: int
     title: str
-    text: str
-
-
-@dataclass(frozen=True)
-class Chunk:
-    """A single indexable unit of text.
-
-    Attributes:
-        chunk_id: Globally unique chunk identifier.
-        doc_id: Identifier of the source article/document.
-        text: Cleaned chunk text.
-    """
-
-    chunk_id: int
-    doc_id: int
     text: str
 
 
@@ -135,26 +118,6 @@ class ArticleDataset:
 
     def __len__(self) -> int:
         return len(self.articles)
-
-    def load_from_json(self, file_path: str) -> None:
-        """Load and validate articles from a JSON file.
-
-        Args:
-            file_path: Path to a JSON file containing a list of article objects
-                with ``article_id``, ``title``, and ``text`` fields.
-
-        Raises:
-            FileNotFoundError: If ``file_path`` does not exist.
-            ValueError: If the top-level JSON value is not a list.
-            pydantic.ValidationError: If any article fails schema validation.
-        """
-        path = Path(file_path)
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(raw, list):
-            raise ValueError(f"Expected a JSON list of articles, got {type(raw).__name__}")
-        self.articles = [Article.model_validate(item) for item in raw]
-        self._enriched_corpus = None
-        logger.info("Loaded %d articles from %s", len(self.articles), path)
 
     def load_from_feather(self, file_path: str | Path) -> None:
         """Load articles from a Feather file, converting the HTML ``body`` to Markdown.

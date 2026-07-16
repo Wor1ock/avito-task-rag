@@ -206,7 +206,10 @@ class HybridSearcher:
                 reverse=True,
             )
 
-            candidates = reranked_candidates + [(idx, score - 1000.0) for idx, score in remaining_candidates]
+            # List order alone decides the final slice (no re-sort below), so the
+            # RRF tail simply backfills after the reranked head when
+            # top_k_final exceeds rerank_depth.
+            candidates = reranked_candidates + remaining_candidates
 
         result = [(self.article_ids[corpus_idx], float(score)) for corpus_idx, score in candidates[:top_k_final]]
         logger.info(
