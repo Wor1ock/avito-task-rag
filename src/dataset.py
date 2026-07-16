@@ -129,6 +129,9 @@ class ArticleDataset:
 
     def __init__(self) -> None:
         self.articles: list[Article] = []
+        # Memoized enriched corpus; rendered at most once per loaded corpus
+        # (shared by BM25 tokenization, dense encoding, and the reranker).
+        self._enriched_corpus: list[str] | None = None
 
     def __len__(self) -> int:
         return len(self.articles)
@@ -150,6 +153,7 @@ class ArticleDataset:
         if not isinstance(raw, list):
             raise ValueError(f"Expected a JSON list of articles, got {type(raw).__name__}")
         self.articles = [Article.model_validate(item) for item in raw]
+        self._enriched_corpus = None
         logger.info("Loaded %d articles from %s", len(self.articles), path)
 
     def load_from_feather(self, file_path: str | Path) -> None:
@@ -177,6 +181,7 @@ class ArticleDataset:
             )
             for row in df.itertuples(index=False)
         ]
+        self._enriched_corpus = None
         logger.info("Parsed %d articles (HTML -> Markdown) from %s", len(self.articles), file_path)
 
     def get_enriched_text(self, article: Article) -> str:
@@ -194,10 +199,16 @@ class ArticleDataset:
     def get_enriched_corpus(self) -> list[str]:
         """Enriched text of every article, in storage order (for dense encoding).
 
+        The result is memoized: repeated calls (BM25 tokenization, dense
+        encoding, reranker candidate texts) reuse the same rendered list until
+        a new corpus is loaded.
+
         Returns:
             One enriched string per article.
         """
-        return [self.get_enriched_text(article) for article in self.articles]
+        if self._enriched_corpus is None:
+            self._enriched_corpus = [self.get_enriched_text(article) for article in self.articles]
+        return self._enriched_corpus
 
     def get_tokenized_corpus(self) -> list[list[str]]:
         """Normalized token lists of the enriched corpus (BM25 input).

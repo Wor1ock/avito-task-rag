@@ -112,9 +112,11 @@ class HybridSearcher:
         dataset_ids = [article.article_id for article in self.dataset.articles]
         if dataset_ids != self.article_ids:
             raise ValueError("Dataset article order does not match the saved index mapping; rebuild the index")
-        self._enriched_corpus = self.dataset.get_enriched_corpus()
 
         if self.reranker_enabled:
+            # The enriched corpus is only consumed by the rerank stage; skip
+            # rendering it entirely when reranking is disabled.
+            self._enriched_corpus = self.dataset.get_enriched_corpus()
             start = time.perf_counter()
             # max_length caps the (query, document) pair at 512 tokens: without
             # it the tokenizer pads/attends up to the model maximum (8192 for
