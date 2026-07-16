@@ -1,102 +1,141 @@
-"""Baseline pipeline entry point.
+"""Interactive hybrid search entry point.
 
-Orchestrates: data loading -> preprocessing/chunking -> index building ->
-hybrid search on the calibration set -> MAP@10 evaluation -> test submission stub.
+Glues the full pipeline together: ensures a corpus exists (mock articles or a
+generated dummy set), builds and saves the BM25 + FAISS indexes when the
+artifacts are missing, then serves an interactive CLI loop that prints the
+top-10 ranked ``article_id`` list with raw reranker scores.
 
-Run with Hydra overrides, e.g.:
+Run from the project root:
 
-    uv run python main.py model.device=cpu top_k_final=10
+    uv run python main.py
 """
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 
-import hydra
-from omegaconf import DictConfig, OmegaConf
-
-from src.dataset import build_chunk_corpus, load_table, save_chunk_metadata
-from src.indexer import BM25Indexer, FaissIndexer
+from src.dataset import ArticleDataset
+from src.indexer import BM25_FILENAME, FAISS_FILENAME, HybridIndexer
 from src.searcher import HybridSearcher
-from src.utils import map_at_k, set_seed
+from src.utils import setup_logger
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger("rag.main")
+
+DATA_DIR = Path("data")
+ARTICLES_PATH = DATA_DIR / "mock_articles.json"
+EXIT_COMMAND = "exit"
+
+# Fallback corpus written to ARTICLES_PATH when no articles file is present.
+DUMMY_ARTICLES = [
+    {
+        "article_id": 1,
+        "title": "Как восстановить доступ к аккаунту",
+        "text": "Если вы забыли пароль, нажмите «Забыли пароль?» на странице входа и следуйте инструкциям.",
+    },
+    {
+        "article_id": 2,
+        "title": "Правила размещения объявлений",
+        "text": "Объявление должно относиться к разрешённой категории. Дубликаты и недостоверные цены запрещены.",
+    },
+    {
+        "article_id": 3,
+        "title": "Как настроить доставку",
+        "text": "Включите Авито Доставку в настройках объявления и выберите удобные пункты отправки товара.",
+    },
+    {
+        "article_id": 4,
+        "title": "Возврат товара и денег",
+        "text": "Покупатель может открыть спор в течение периода защиты, если товар не соответствует описанию.",
+    },
+    {
+        "article_id": 5,
+        "title": "Как продвигать объявления",
+        "text": "Платные услуги продвижения поднимают объявление в результатах поиска и увеличивают просмотры.",
+    },
+    {
+        "article_id": 6,
+        "title": "Безопасная сделка: как это работает",
+        "text": "Деньги замораживаются на счёте до получения товара покупателем, после чего переводятся продавцу.",
+    },
+    {
+        "article_id": 7,
+        "title": "Что делать при встрече с мошенниками",
+        "text": "Не переходите по внешним ссылкам и не сообщайте коды из СМС. Пожалуйтесь на подозрительный профиль.",
+    },
+    {
+        "article_id": 8,
+        "title": "Тарифы и оплата для бизнеса",
+        "text": "Для профессиональных продавцов доступны пакеты размещений и кабинет Авито Про со статистикой.",
+    },
+]
 
 
-@hydra.main(config_path="configs", config_name="config", version_base="1.3")
-def main(cfg: DictConfig) -> None:
-    """Run the full retrieval baseline described by the Hydra config.
+def ensure_articles_file() -> None:
+    """Create ``ARTICLES_PATH`` with the dummy corpus when it is missing."""
+    if ARTICLES_PATH.exists():
+        return
+    ARTICLES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ARTICLES_PATH.write_text(json.dumps(DUMMY_ARTICLES, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info(
+        "Articles file missing: generated dummy dataset at %s (%d articles)",
+        ARTICLES_PATH,
+        len(DUMMY_ARTICLES),
+    )
+
+
+def ensure_index(dataset: ArticleDataset) -> None:
+    """Build and persist the hybrid index unless both artifacts already exist.
 
     Args:
-        cfg: Composed configuration (see ``configs/config.yaml``).
+        dataset: Corpus to index when the artifacts are missing.
     """
-    log.info("Resolved config:\n%s", OmegaConf.to_yaml(cfg))
-    set_seed(cfg.seed)
+    bm25_path = DATA_DIR / BM25_FILENAME
+    faiss_path = DATA_DIR / FAISS_FILENAME
+    if bm25_path.exists() and faiss_path.exists():
+        logger.info("Found existing index artifacts (%s, %s): skipping build", bm25_path, faiss_path)
+        return
+    logger.info("Index artifacts missing: building from %d articles", len(dataset))
+    indexer = HybridIndexer()
+    indexer.build_index(dataset)
+    indexer.save(str(DATA_DIR))
 
-    # --- 1. Load data -----------------------------------------------------
-    articles = load_table(cfg.path.articles)
-    calibration = load_table(cfg.path.calibration)
-    test = load_table(cfg.path.test)
-    log.info(
-        "Loaded %d articles, %d calibration queries, %d test queries",
-        len(articles),
-        len(calibration),
-        len(test),
-    )
 
-    # --- 2. Preprocess: clean HTML and chunk ------------------------------
-    chunks = build_chunk_corpus(
-        articles,
-        chunk_size=cfg.model.chunk_size,
-        chunk_overlap=cfg.model.chunk_overlap,
-    )
-    save_chunk_metadata(chunks, cfg.path.chunk_metadata)
-    log.info("Built %d chunks", len(chunks))
+def run_cli(searcher: HybridSearcher) -> None:
+    """Serve queries interactively until the user types 'exit'.
 
-    # --- 3. Build indexes --------------------------------------------------
-    bm25 = BM25Indexer()
-    bm25.build(chunks)
-    bm25.save(cfg.path.bm25_index)
+    Args:
+        searcher: Fully initialized hybrid searcher.
+    """
+    print("Hybrid help-center search. Type a question, or 'exit' to quit.")
+    while True:
+        try:
+            query = input("\nquery> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            break
+        if not query:
+            continue
+        if query.lower() == EXIT_COMMAND:
+            break
+        results = searcher.search_with_scores(query)
+        print(f"Top-{len(results)} articles:")
+        for rank, (article_id, score) in enumerate(results, start=1):
+            print(f"  {rank:2d}. article_id={article_id:<6d} reranker_score={score:+.4f}")
+    print("Bye.")
 
-    dense = FaissIndexer(
-        model_name=cfg.model.bi_encoder,
-        device=cfg.model.device,
-        batch_size=cfg.model.batch_size,
-        max_seq_length=cfg.model.max_seq_length,
-        normalize_embeddings=cfg.model.normalize_embeddings,
-    )
-    dense.build(chunks)
-    dense.save(cfg.path.faiss_index)
 
-    # --- 4. Hybrid search on the calibration set ---------------------------
-    searcher = HybridSearcher(
-        bm25_indexer=bm25,
-        faiss_indexer=dense,
-        chunk_to_doc={c.chunk_id: c.doc_id for c in chunks},
-        rrf_k=cfg.hybrid.rrf_k,
-        bm25_weight=cfg.hybrid.bm25_weight,
-        dense_weight=cfg.hybrid.dense_weight,
-    )
-    calibration_predictions = {
-        # TODO: adapt column names ("query_id", "query") to the real schema.
-        row["query_id"]: searcher.search(
-            row["query"],
-            top_k_candidates=cfg.top_k_candidates,
-            top_k_final=cfg.top_k_final,
-        )
-        for _, row in calibration.iterrows()
-    }
+def main() -> None:
+    """Run the full pipeline: corpus -> (build or load) index -> CLI loop."""
+    setup_logger()
+    ensure_articles_file()
 
-    # --- 5. Evaluate MAP@10 -------------------------------------------------
-    # TODO: build ground_truth from the calibration table's relevance column.
-    ground_truth: dict[int, set[int]] = {}
-    score = map_at_k(ground_truth, calibration_predictions, k=cfg.top_k_final)
-    log.info("Calibration MAP@%d = %.4f", cfg.top_k_final, score)
+    dataset = ArticleDataset()
+    dataset.load_from_json(str(ARTICLES_PATH))
 
-    # --- 6. Generate test submission stub ------------------------------------
-    # TODO: run searcher over the test queries and write cfg.path.submission
-    # in the competition's expected format (query_id, ranked doc ids).
-    log.info("Submission stub would be written to %s", cfg.path.submission)
+    ensure_index(dataset)
+    searcher = HybridSearcher(dataset, index_dir=str(DATA_DIR))
+    run_cli(searcher)
 
 
 if __name__ == "__main__":

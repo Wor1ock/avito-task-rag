@@ -119,6 +119,25 @@ class HybridSearcher:
             ``article_id`` list ordered by decreasing cross-encoder relevance,
             length <= ``top_k_final``.
         """
+        return [article_id for article_id, _ in self.search_with_scores(query, top_k_candidates, top_k_final)]
+
+    def search_with_scores(
+        self,
+        query: str,
+        top_k_candidates: int = 30,
+        top_k_final: int = 10,
+    ) -> list[tuple[int, float]]:
+        """Like :meth:`search`, but keeps the raw cross-encoder relevance scores.
+
+        Args:
+            query: Raw query text.
+            top_k_candidates: Candidates fetched per first-stage retriever.
+            top_k_final: Number of article ids in the final ranking.
+
+        Returns:
+            ``(article_id, reranker_score)`` pairs ordered by decreasing score,
+            length <= ``top_k_final``.
+        """
         start = time.perf_counter()
         lexical = self._search_lexical(query, top_k_candidates)
         semantic = self._search_semantic(query, top_k_candidates)
@@ -129,7 +148,7 @@ class HybridSearcher:
         ce_scores = self.reranker.predict(pairs, show_progress_bar=False)
 
         ranked = sorted(zip(candidates, ce_scores, strict=True), key=lambda item: item[1], reverse=True)
-        result = [self.article_ids[idx] for idx, _ in ranked[:top_k_final]]
+        result = [(self.article_ids[idx], float(score)) for idx, score in ranked[:top_k_final]]
         logger.info(
             "Query served in %.2fs (%d lexical + %d semantic -> %d unique candidates)",
             time.perf_counter() - start,
