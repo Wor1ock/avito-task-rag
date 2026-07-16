@@ -23,6 +23,7 @@ class PathConfig(BaseModel):
     bm25_index: Path
     faiss_index: Path
     submission: Path
+    calibration_answer: Path
 
 
 class ModelConfig(BaseModel):

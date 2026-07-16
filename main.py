@@ -121,6 +121,11 @@ def run_validation(searcher: HybridSearcher, config: AppConfig) -> None:
         top_k_candidates=config.top_k_candidates,
         desc="calibration",
     )
+    # Persist the calibration predictions in submission format for per-query
+    # error analysis against the ground truth.
+    config.path.calibration_answer.parent.mkdir(parents=True, exist_ok=True)
+    predictions_table.to_csv(config.path.calibration_answer, index=False)
+    logger.info("Wrote calibration predictions to %s", config.path.calibration_answer)
     # Parse the submission-format answer strings back into id lists, mirroring
     # how the official scorer reads answer.csv (same serialize -> parse round-trip).
     predictions = [[int(token) for token in answer.split()] for answer in predictions_table["answer"]]

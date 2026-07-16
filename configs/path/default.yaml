@@ -14,3 +14,5 @@ faiss_index: ${path.index_dir}/faiss.index
 
 # Output submission file for the test set.
 submission: answer.csv
+# Calibration predictions in submission format, kept for per-query error analysis.
+calibration_answer: ${path.data_dir}/calibration_answer.csv
