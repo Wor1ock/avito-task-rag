@@ -1,65 +1,57 @@
-# RAG Retrieval Baseline
+# RAG Help Center Search Engine
+В этой задаче нужно решить этап поиска: по тексту вопроса пользователя найти статьи, которые стоит передать дальше в пайплайн.
 
-Information Retrieval baseline for a RAG pipeline: hybrid search combining
-**BM25** (sparse) and **FAISS** dense retrieval over a **LaBSE** bi-encoder,
-fused with **Reciprocal Rank Fusion (RRF)** and evaluated with **MAP@10**.
+Двухэтапный гибридный пайплайн (Hybrid Search + Cross-Encoder Reranking) для поиска релевантных статей справочного центра по вопросам пользователей.
 
-## Pipeline
+## Данные
+Для работы пайплайна необходимы [три файла](https://www.dropbox.com/scl/fi/v5hheavft3kw800kpabex/candidate_public.zip?rlkey=aalce34t5eohri4atk5fur1r4&st=2y96nmvt&dl=1) в формате Feather:
 
-```
-articles.f ──► clean HTML ──► chunk ──► BM25 index ─┐
-                                   └──► FAISS index ─┤► RRF fusion ──► (re-ranker) ──► top-10 docs
-queries ─────────────────────────────────────────────┘
-```
+- `articles.f` — база статей справки  
+`article_id` — целочисленный идентификатор статьи;  
+`title` — заголовок статьи;  
+`body` — текст статьи в HTML.
 
-## Project layout
+- `calibration.f` — размеченные запросы для локальной проверки подхода  
+`query_id` — идентификатор запроса,  
+`query_text` — текст вопроса пользователя,  
+`ground_truth` — правильные `article_id`, разделённые пробелами.
 
-```
-configs/            Hydra configs (main + path/model groups)
-src/dataset.py      Loading (Feather/Parquet), HTML cleaning, chunking
-src/indexer.py      BM25Indexer and FaissIndexer (build/save/load)
-src/searcher.py     HybridSearcher: BM25 + FAISS + RRF + re-ranker stub
-src/utils.py        MAP@10 metric, seeding
-main.py             Hydra entry point orchestrating the full baseline
-```
+- `test.f` — запросы, для которых нужно подготовить ответ  
+`query_id` — идентификатор запроса,  
+`query_text` — текст вопроса пользователя.
+
+## Метрика
+
+Решения оцениваются по `MAP@10`.
+
+Для одного запроса считается `AP@10`: чем выше в списке стоят релевантные документы, тем больше их вклад. Затем значение усредняется по всем запросам.
+
+Если для запроса есть несколько правильных статей, в оценке учитываются все найденные документы, а не только первый.
 
 ## Setup
-
-Requires [uv](https://docs.astral.sh/uv/) and Python 3.10.
-
-```bash
-uv sync                 # CPU FAISS (default)
-uv sync --extra gpu     # + faiss-gpu-cu12 (Linux only)
-```
-
-PyTorch is resolved from the CUDA 12.4 wheel index (`download.pytorch.org/whl/cu124`)
-on Linux/Windows automatically.
-
-## Data
-
-Place the datasets under `data/` (configurable in `configs/path/default.yaml`):
-
-- `data/articles.f` — article corpus (HTML text)
-- `data/calibration.f` — validation queries with relevance labels
-- `data/test.f` — test queries for the submission
-
-## Run
+Убедитесь, что у вас установлен [uv](https://github.com/astral-sh/uv).
 
 ```bash
-uv run python main.py                          # full baseline
-uv run python main.py model.device=cpu         # override any config value
-uv run python main.py top_k_candidates=200 hybrid.rrf_k=20
+uv sync
+uv run pre-commit install
 ```
 
-Hydra writes run logs to `outputs/` (git-ignored).
+## Запуск проекта
+Пайплайн полностью автоматизирован и выполняется внутри единого контекста в main.py. Код самостоятельно управляет жизненным циклом индексов и стадиями обработки.
 
-## Status
+Для запуска пайплайна выполните команду в терминале:
 
-This is a **skeleton**: all functions/classes carry full signatures and
-docstrings but raise `NotImplementedError`. Implement in this order:
+```bash
+set PYTHONUTF8=1
+uv run main.py
+```
 
-1. `src/dataset.py` — loading, cleaning, chunking
-2. `src/indexer.py` — BM25 and FAISS build/save/load
-3. `src/searcher.py` — retrieval, RRF fusion, doc aggregation
-4. `src/utils.py` — AP@k / MAP@k
-5. `main.py` — wire ground truth + submission writing to the real schema
+## Что происходит при запуске:
+   1. предобработка и очистка HTML;
+   2. если файлы индексов отсутствуют в data/, автоматически строятся два индекса: лексический (`BM25Okapi`) и векторный семантический (FAISS на модели `paraphrase-multilingual-MiniLM-L12-v2`);
+   3. скрипт делает предсказания для calibration.f, вычисляет точную метрику MAP@10 и выводит её значение в консоль;
+   4. происходит пакетный расчет ответов для test.f. для каждого запроса извлекается пул из 30 кандидатов, который переранжируется `BAAI/bge-reranker-base`. итоговый топ-10 сохраняется в файл answer.csv в корне проекта.
+
+## примечания
+* при первом старте библиотеки автоматически скачают веса эмбеддера и реранкера с Hugging Face в кэш;
+* пути к данным прописаны в config.yaml.
