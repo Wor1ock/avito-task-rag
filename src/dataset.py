@@ -1,17 +1,33 @@
-"""Data loading, HTML cleaning, and text chunking.
+"""Data management layer: article loading, validation, and text enrichment.
 
-This module turns raw article/query tables (Feather / Parquet) into a flat
-chunk-level corpus ready for indexing:
-
-    load_table -> clean_html -> chunk_text -> build_chunk_corpus
+Pipeline: JSON articles -> pydantic validation -> enriched text (title
+boosting) -> normalized token corpus for lexical (BM25) and semantic indexing.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-import pandas as pd
+from pydantic import BaseModel
+
+from src.utils import tokenize
+
+logger = logging.getLogger("rag.dataset")
+
+# The title is repeated this many times at the start of the enriched text so
+# title words carry more weight in both BM25 term frequencies and embeddings.
+TITLE_BOOST_REPEATS = 3
+
+
+class Article(BaseModel):
+    """A single help-center article."""
+
+    article_id: int
+    title: str
+    text: str
 
 
 @dataclass(frozen=True)
@@ -29,87 +45,62 @@ class Chunk:
     text: str
 
 
-def load_table(path: str | Path) -> pd.DataFrame:
-    """Load a dataset table from Feather or Parquet.
+class ArticleDataset:
+    """In-memory article store with validation and enrichment helpers."""
 
-    The format is inferred from the file extension (``.f`` / ``.feather``
-    are read as Feather, ``.parquet`` as Parquet).
+    def __init__(self) -> None:
+        self.articles: list[Article] = []
 
-    Args:
-        path: Path to the dataset file.
+    def __len__(self) -> int:
+        return len(self.articles)
 
-    Returns:
-        The loaded table.
+    def load_from_json(self, file_path: str) -> None:
+        """Load and validate articles from a JSON file.
 
-    Raises:
-        FileNotFoundError: If ``path`` does not exist.
-        ValueError: If the file extension is not supported.
-    """
-    raise NotImplementedError
+        Args:
+            file_path: Path to a JSON file containing a list of article objects
+                with ``article_id``, ``title``, and ``text`` fields.
 
+        Raises:
+            FileNotFoundError: If ``file_path`` does not exist.
+            ValueError: If the top-level JSON value is not a list.
+            pydantic.ValidationError: If any article fails schema validation.
+        """
+        path = Path(file_path)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, list):
+            raise ValueError(f"Expected a JSON list of articles, got {type(raw).__name__}")
+        self.articles = [Article.model_validate(item) for item in raw]
+        logger.info("Loaded %d articles from %s", len(self.articles), path)
 
-def clean_html(raw_html: str) -> str:
-    """Strip HTML markup and normalize whitespace.
+    def get_enriched_text(self, article: Article) -> str:
+        """Concatenate title and body, repeating the title to boost its weight.
 
-    Uses :class:`~bs4.BeautifulSoup` to extract visible text, dropping
-    script/style contents and collapsing consecutive whitespace.
+        Args:
+            article: Validated article.
 
-    Args:
-        raw_html: Raw HTML string (may also be plain text).
+        Returns:
+            ``title`` repeated :data:`TITLE_BOOST_REPEATS` times followed by
+            the article text.
+        """
+        title_block = " ".join([article.title] * TITLE_BOOST_REPEATS)
+        return f"{title_block} {article.text}".strip()
 
-    Returns:
-        Cleaned plain-text string.
-    """
-    raise NotImplementedError
+    def get_enriched_corpus(self) -> list[str]:
+        """Enriched text of every article, in storage order (for dense encoding).
 
+        Returns:
+            One enriched string per article.
+        """
+        return [self.get_enriched_text(article) for article in self.articles]
 
-def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
-    """Split a text into overlapping character-based chunks.
+    def get_tokenized_corpus(self) -> list[list[str]]:
+        """Normalized token lists of the enriched corpus (BM25 input).
 
-    Args:
-        text: Cleaned input text.
-        chunk_size: Maximum chunk length in characters.
-        chunk_overlap: Number of characters shared between consecutive chunks.
+        Uses :func:`src.utils.tokenize` (lowercasing + punctuation removal +
+        whitespace splitting) on each enriched article text.
 
-    Returns:
-        List of chunk strings (empty list for empty input).
-
-    Raises:
-        ValueError: If ``chunk_overlap >= chunk_size``.
-    """
-    raise NotImplementedError
-
-
-def build_chunk_corpus(
-    articles: pd.DataFrame,
-    chunk_size: int,
-    chunk_overlap: int,
-    text_column: str = "text",
-    id_column: str = "doc_id",
-) -> list[Chunk]:
-    """Build the chunk-level corpus from an articles table.
-
-    For every article: clean the HTML, split it into chunks, and assign
-    globally unique chunk ids while keeping the mapping back to ``doc_id``.
-
-    Args:
-        articles: Table with at least ``id_column`` and ``text_column``.
-        chunk_size: Maximum chunk length in characters.
-        chunk_overlap: Overlap between consecutive chunks in characters.
-        text_column: Name of the column holding raw article HTML/text.
-        id_column: Name of the column holding the document identifier.
-
-    Returns:
-        Flat list of :class:`Chunk` objects covering the whole corpus.
-    """
-    raise NotImplementedError
-
-
-def save_chunk_metadata(chunks: list[Chunk], path: str | Path) -> None:
-    """Persist the chunk -> document mapping as a Parquet file.
-
-    Args:
-        chunks: Chunk corpus produced by :func:`build_chunk_corpus`.
-        path: Destination Parquet path (parent directories are created).
-    """
-    raise NotImplementedError
+        Returns:
+            One token list per article, in storage order.
+        """
+        return [tokenize(text) for text in self.get_enriched_corpus()]
