@@ -19,39 +19,51 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# GPU FAISS wheels are Linux-only; install with: uv sync --extra gpu
-gpu = [
-    "faiss-gpu-cu12>=1.8.0; sys_platform == 'linux'",
-]
 dev = [
     "ruff>=0.5.0",
-    "pytest>=8.0.0",
 ]
-
-[tool.uv]
-# CUDA 12.4 wheels for torch come from the PyTorch index, everything else from PyPI.
-conflicts = []
-
-[tool.uv.sources]
-torch = [
-    { index = "pytorch-cu124", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
-]
-
-[[tool.uv.index]]
-name = "pytorch-cu124"
-url = "https://download.pytorch.org/whl/cu124"
-explicit = true
 
 [tool.ruff]
-line-length = 100
+line-length = 120
 target-version = "py310"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "W", "B", "UP"]
+select = [
+      "F",   # Formats
+      "E",   # Errors
+      "W",   # Whitespace
+      "I",   # Imports
+      "ARG", # Unused arguments
+      "SIM", # Code simplifications
+      "Q",   # Quotes
+      "PIE", # Unnecessary operation
+      "A",   # Built-ins shadowing
+      "B",   # Bugs
+      "PLE", # Errors
+      "UP",  # Warn if certain things can changed due to newer Python versions
+      "C4",  # Catch incorrect use of comprehensions
+      "ICN", # Use common import conventions
+      "RET", # Return practices
+      "PTH", # Pathlib instead of os.path
+      "NPY", # NumPy things
+]
+ignore = [
+      "E741",
+      "N803",
+      "RET504",
+      "ISC001",
+      "F722",
+]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.6.0",
+    "ruff>=0.15.21",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]

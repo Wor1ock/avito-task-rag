@@ -1,0 +1,23 @@
+exclude: ^(data/|models/|.venv/|logs/|notebooks/.ipynb_checkpoints/)
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-ast
+      - id: check-toml
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: no-commit-to-branch
+        args: [--branch, master]
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.9
+    hooks:
+      - id: ruff-check
+        types_or: [python, pyi, jupyter]
+        args: [--fix]
+        stages: [pre-commit]
+      - id: ruff-format
+        types_or: [python, pyi, jupyter]
+        stages: [pre-commit]

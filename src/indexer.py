@@ -51,7 +51,7 @@ class BM25Indexer:
         raise NotImplementedError
 
     @classmethod
-    def load(cls, path: str | Path) -> "BM25Indexer":
+    def load(cls, path: str | Path) -> BM25Indexer:
         """Load a previously saved BM25 index.
 
         Args:
@@ -130,7 +130,7 @@ class FaissIndexer:
         model_name: str,
         device: str = "cuda",
         **encode_kwargs: object,
-    ) -> "FaissIndexer":
+    ) -> FaissIndexer:
         """Load a previously saved FAISS index.
 
         Args:

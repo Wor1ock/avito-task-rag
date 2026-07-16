@@ -53,16 +53,6 @@ uv run python main.py top_k_candidates=200 hybrid.rrf_k=20
 
 Hydra writes run logs to `outputs/` (git-ignored).
 
-## Docker
-
-```bash
-docker build -t rag-retrieval-baseline .
-docker run --gpus all \
-  -v "$PWD/data:/app/data" \
-  -v "$PWD/artifacts:/app/artifacts" \
-  rag-retrieval-baseline
-```
-
 ## Status
 
 This is a **skeleton**: all functions/classes carry full signatures and

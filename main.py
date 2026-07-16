@@ -39,7 +39,9 @@ def main(cfg: DictConfig) -> None:
     test = load_table(cfg.path.test)
     log.info(
         "Loaded %d articles, %d calibration queries, %d test queries",
-        len(articles), len(calibration), len(test),
+        len(articles),
+        len(calibration),
+        len(test),
     )
 
     # --- 2. Preprocess: clean HTML and chunk ------------------------------
