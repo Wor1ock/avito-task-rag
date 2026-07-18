@@ -14,9 +14,9 @@ top_k_final: 10
 # Hybrid search fusion parameters.
 hybrid:
   # Reciprocal Rank Fusion constant: score = sum(weight / (rrf_k + rank)).
-  rrf_k: 60
-  bm25_weight: 0.5
-  dense_weight: 0.5
+  rrf_k: 30
+  bm25_weight: 0.4
+  dense_weight: 0.6
 
 # Optional cross-encoder re-ranking stage (disabled in the baseline).
 reranker:
@@ -28,7 +28,7 @@ reranker:
 # null for both disables sampling. random_state pins the selected rows so
 # validation numbers stay comparable across runs.
 sampling:
-  sample_frac: 0.2
+  sample_frac: 1
   sample_size: null
   random_state: 42
 
