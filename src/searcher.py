@@ -50,6 +50,7 @@ class HybridSearcher:
         dense_weight: float,
         reranker_enabled: bool = False,
         reranker_name: str | None = None,
+        rerank_depth: int = 15,
         device: str | None = None,
     ) -> None:
         """
@@ -67,6 +68,9 @@ class HybridSearcher:
                 cross-encoder.
             reranker_name: Cross-encoder checkpoint; defaults to
                 :data:`DEFAULT_RERANKER_MODEL` when None and reranking is enabled.
+            rerank_depth: How many top fused candidates the cross-encoder
+                re-scores (``reranker.rerank_depth``); the RRF tail keeps its
+                fusion order.
             device: Torch device for the reranker; auto-detected when None.
         """
         self.dataset = dataset
@@ -77,6 +81,7 @@ class HybridSearcher:
         self.dense_weight = dense_weight
         self.reranker_enabled = reranker_enabled
         self.reranker_name = reranker_name or DEFAULT_RERANKER_MODEL
+        self.rerank_depth = rerank_depth
         self.device = device
         self._encoder = encoder
         self.bm25 = None
@@ -193,7 +198,7 @@ class HybridSearcher:
         candidates = self._fuse([(self.bm25_weight, lexical), (self.dense_weight, semantic)])
 
         if self.reranker is not None:
-            rerank_depth = min(15, len(candidates))
+            rerank_depth = min(self.rerank_depth, len(candidates))
             indices = [corpus_idx for corpus_idx, _ in candidates[:rerank_depth]]
             remaining_candidates = candidates[rerank_depth:]
 

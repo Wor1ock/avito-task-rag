@@ -22,6 +22,9 @@ hybrid:
 reranker:
   enabled: true
   model_name: "BAAI/bge-reranker-v2-m3"
+  # How many top fused candidates are re-scored by the cross-encoder; the
+  # RRF tail below this depth keeps its fusion order.
+  rerank_depth: 15
 
 # Reproducible subsampling of the calibration/test query sets for faster
 # iteration. Set at most one of sample_frac (0 < f <= 1) or sample_size;

@@ -88,6 +88,7 @@ def build_searcher(dataset: ArticleDataset, config: AppConfig) -> HybridSearcher
         "dense_weight": config.hybrid.dense_weight,
         "reranker_enabled": config.reranker.enabled,
         "reranker_name": config.reranker.model_name,
+        "rerank_depth": config.reranker.rerank_depth,
         "device": config.model.device,
     }
     ensure_index(dataset, encoder, config)

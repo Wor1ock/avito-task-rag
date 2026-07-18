@@ -51,6 +51,7 @@ class RerankerConfig(BaseModel):
 
     enabled: bool
     model_name: str | None = None
+    rerank_depth: int = Field(default=15, gt=0)
 
 
 class SamplingConfig(BaseModel):
