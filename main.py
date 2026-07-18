@@ -44,6 +44,8 @@ def build_encoder(config: AppConfig) -> HybridIndexer:
         device=config.model.device,
         max_seq_length=config.model.max_seq_length,
         normalize_embeddings=config.model.normalize_embeddings,
+        chunk_size=config.model.chunk_size,
+        chunk_overlap=config.model.chunk_overlap,
     )
 
 

@@ -1,7 +1,8 @@
-"""Hybrid index construction: sparse BM25 and dense FAISS over enriched articles.
+"""Hybrid index construction: article-level BM25 and chunk-level dense FAISS.
 
-Pipeline: ArticleDataset -> enriched texts -> (tokenized corpus -> BM25Okapi,
-dense embeddings -> L2-normalize -> IndexFlatIP) -> persisted artifacts.
+Pipeline: ArticleDataset -> (enriched texts -> tokenized corpus -> BM25Okapi,
+title-prefixed chunks -> dense embeddings -> L2-normalize -> IndexFlatIP)
+-> persisted artifacts, each FAISS position mapped to its parent article_id.
 """
 
 from __future__ import annotations
@@ -26,8 +27,9 @@ DEFAULT_EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-
 class HybridIndexer:
     """Builds and persists a sparse (BM25) and a dense (FAISS) index in lockstep.
 
-    Both indexes are built over the same enriched corpus in the same order, so
-    a position in either index maps to the same entry of :attr:`article_ids`.
+    BM25 positions map to whole articles via :attr:`article_ids`; FAISS
+    positions map to overlapping article chunks whose parent article_id is
+    kept, position-aligned, in :attr:`chunk_article_ids`.
     """
 
     def __init__(
@@ -37,6 +39,8 @@ class HybridIndexer:
         device: str | None = None,
         max_seq_length: int | None = None,
         normalize_embeddings: bool = True,
+        chunk_size: int = 500,
+        chunk_overlap: int = 50,
     ) -> None:
         """
         Args:
@@ -46,16 +50,23 @@ class HybridIndexer:
             max_seq_length: Encoder input truncation length; model default when None.
             normalize_embeddings: L2-normalize embeddings so inner product in
                 :class:`faiss.IndexFlatIP` equals cosine similarity.
+            chunk_size: Character window length for article chunking
+                (``model.chunk_size``).
+            chunk_overlap: Characters shared between consecutive chunks
+                (``model.chunk_overlap``).
         """
         self.model_name = model_name
         self.batch_size = batch_size
         self.device = device
         self.max_seq_length = max_seq_length
         self.normalize_embeddings = normalize_embeddings
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
         self.model: SentenceTransformer | None = None
         self.bm25: BM25Okapi | None = None
         self.faiss_index: faiss.Index | None = None
         self.article_ids: list[int] = []
+        self.chunk_article_ids: list[int] = []
 
     def _load_model(self) -> SentenceTransformer:
         """Lazily instantiate the bi-encoder (kept for query encoding reuse)."""
@@ -109,12 +120,14 @@ class HybridIndexer:
         logger.info("Built BM25 index over %d documents in %.2fs", len(dataset), time.perf_counter() - start)
 
         start = time.perf_counter()
-        embeddings = self.encode(dataset.get_enriched_corpus(), show_progress=True)
+        chunks, self.chunk_article_ids = dataset.get_chunked_corpus(self.chunk_size, self.chunk_overlap)
+        embeddings = self.encode(chunks, show_progress=True)
         self.faiss_index = faiss.IndexFlatIP(embeddings.shape[1])
         self.faiss_index.add(embeddings)
         logger.info(
-            "Built FAISS IndexFlatIP (%d vectors, dim=%d) in %.2fs",
+            "Built FAISS IndexFlatIP (%d chunk vectors over %d articles, dim=%d) in %.2fs",
             self.faiss_index.ntotal,
+            len(dataset),
             embeddings.shape[1],
             time.perf_counter() - start,
         )
@@ -123,7 +136,8 @@ class HybridIndexer:
         """Persist both indexes and the article id mapping.
 
         Args:
-            bm25_path: Destination for the pickled BM25 index + article_ids.
+            bm25_path: Destination for the pickled BM25 index + the article_ids
+                and chunk_article_ids position mappings.
             faiss_path: Destination for the serialized FAISS index.
 
         Raises:
@@ -137,6 +151,9 @@ class HybridIndexer:
         faiss_path.parent.mkdir(parents=True, exist_ok=True)
 
         with bm25_path.open("wb") as f:
-            pickle.dump({"bm25": self.bm25, "article_ids": self.article_ids}, f)
+            pickle.dump(
+                {"bm25": self.bm25, "article_ids": self.article_ids, "chunk_article_ids": self.chunk_article_ids},
+                f,
+            )
         faiss.write_index(self.faiss_index, str(faiss_path))
         logger.info("Saved BM25 index to %s and FAISS index to %s", bm25_path, faiss_path)
