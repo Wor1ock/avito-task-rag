@@ -6,10 +6,12 @@ import logging
 import random
 import re
 import sys
+from functools import lru_cache
 from pathlib import Path
 
 import html2text
 import numpy as np
+import pymorphy3
 import torch
 
 # Matches any character that is not a word character (letters/digits/underscore,
@@ -23,6 +25,30 @@ _HTML_INVISIBLE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1\s*>", re.IGNORE
 _EXCESS_NEWLINES_RE = re.compile(r"\n{3,}")
 
 DEFAULT_LOG_FILE = Path("data/app.log")
+
+# Common Russian stop-words (function words carrying no retrieval signal).
+# Tokens are checked against this set both as-is and after lemmatization, so
+# base forms here (я, весь, этот, ...) also filter their inflected variants.
+RUSSIAN_STOP_WORDS = frozenset(
+    # A whitespace-delimited block stays readable and diff-friendly for a
+    # 150-word list, unlike the one-quoted-string-per-word literal SIM905 wants.
+    """
+    а бы был была были было быть в вам вас вдруг ведь во вот впрочем все всегда
+    всего всех всю вы г где да даже два для до другой его ее ей ему если есть
+    еще ж же за зачем здесь и из или им иногда их к как какая какой когда
+    конечно который кто куда ли лучше между меня мне много может можно мой моя
+    мы на над надо наконец нас не него нее ней нельзя нет ни нибудь никогда ним
+    них ничего но ну о об один он она они оно опять от перед по под после потом
+    потому почти при про раз разве с сам свой себе себя сейчас со совсем так
+    такой там тебя тем теперь то тогда того тоже только том тот три тут ты у
+    уж уже хоть хорошо чего чем через что чтоб чтобы чуть эти этого этой этом
+    этот эту я
+    """.split()  # noqa: SIM905
+)
+
+# The morphological analyzer is heavyweight (loads the Russian dictionaries),
+# so it is created lazily on first tokenization, not at import time.
+_morph_analyzer: pymorphy3.MorphAnalyzer | None = None
 
 
 def _build_markdown_converter() -> html2text.HTML2Text:
@@ -71,17 +97,50 @@ def normalize_text(text: str) -> str:
     return _WHITESPACE_RE.sub(" ", text).strip()
 
 
+@lru_cache(maxsize=262_144)
+def lemmatize(token: str) -> str:
+    """Reduce a Russian token to its normal form (lemma) via pymorphy3.
+
+    Results are memoized: corpus vocabulary repeats heavily, so most lookups
+    hit the cache instead of the morphological analyzer. Non-Russian tokens
+    (Latin words, digits) pass through effectively unchanged.
+
+    Args:
+        token: A single lowercase word token.
+
+    Returns:
+        The token's lemma.
+    """
+    global _morph_analyzer
+    if _morph_analyzer is None:
+        _morph_analyzer = pymorphy3.MorphAnalyzer()
+    return _morph_analyzer.parse(token)[0].normal_form
+
+
 def tokenize(text: str) -> list[str]:
-    """Split text into word tokens for BM25 (normalization + whitespace split).
+    """Split text into lemma tokens for BM25, dropping Russian stop-words.
+
+    Pipeline: :func:`normalize_text` (lowercase, punctuation removal) ->
+    whitespace split -> stop-word filter -> :func:`lemmatize` -> stop-word
+    filter on the lemma (catches inflected forms of stop-words).
 
     Args:
         text: Raw input string.
 
     Returns:
-        List of lowercase tokens; empty list for empty/punctuation-only input.
+        List of lowercase lemmas; empty list for empty/punctuation-only input.
     """
     normalized = normalize_text(text)
-    return normalized.split() if normalized else []
+    if not normalized:
+        return []
+    tokens: list[str] = []
+    for token in normalized.split():
+        if token in RUSSIAN_STOP_WORDS:
+            continue
+        lemma = lemmatize(token)
+        if lemma not in RUSSIAN_STOP_WORDS:
+            tokens.append(lemma)
+    return tokens
 
 
 def set_seed(seed: int) -> None:

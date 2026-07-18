@@ -177,7 +177,8 @@ class ArticleDataset:
         """Normalized token lists of the enriched corpus (BM25 input).
 
         Uses :func:`src.utils.tokenize` (lowercasing + punctuation removal +
-        whitespace splitting) on each enriched article text.
+        Russian stop-word filtering + lemmatization) on each enriched article
+        text.
 
         Returns:
             One token list per article, in storage order.
