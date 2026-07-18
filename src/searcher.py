@@ -242,6 +242,9 @@ class HybridSearcher:
             Length <= ``top_k_final``.
         """
         start = time.perf_counter()
+        # Only the BM25 path normalizes the query (tokenize() inside
+        # _search_lexical strips punctuation/stop-words and lemmatizes); the
+        # bi-encoder and the reranker both receive the raw query string.
         lexical = self._search_lexical(query, top_k_candidates)
         query_vec = self._encoder.encode([query])
         semantic = self._search_semantic(query_vec, top_k_candidates)
