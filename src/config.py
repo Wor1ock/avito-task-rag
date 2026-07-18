@@ -27,13 +27,21 @@ class PathConfig(BaseModel):
 
 
 class ModelConfig(BaseModel):
-    """Bi-encoder settings (``configs/model``)."""
+    """Bi-encoder and chunking settings (``configs/model``)."""
 
     bi_encoder: str
     device: str | None = None
     batch_size: int = Field(gt=0)
     max_seq_length: int = Field(gt=0)
     normalize_embeddings: bool
+    chunk_size: int = Field(gt=0)
+    chunk_overlap: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _overlap_below_size(self) -> ModelConfig:
+        if self.chunk_overlap >= self.chunk_size:
+            raise ValueError("chunk_overlap must be smaller than chunk_size")
+        return self
 
 
 class HybridConfig(BaseModel):

@@ -6,6 +6,10 @@ device: null
 
 # Encoding parameters.
 batch_size: 64
+# Article Markdown is split into overlapping character windows before dense
+# encoding. Changing either value requires rebuilding the FAISS index.
+chunk_size: 500
+chunk_overlap: 50
 # Encoder input truncation length. 512 is the MiniLM maximum; anything lower
 # blinds the dense index to article content beyond the truncation point.
 # Changing this requires rebuilding the FAISS index.
