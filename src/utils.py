@@ -10,9 +10,11 @@ from functools import lru_cache
 from pathlib import Path
 
 import html2text
+import nltk
 import numpy as np
 import pymorphy3
 import torch
+from nltk.corpus import stopwords
 
 # Matches any character that is not a word character (letters/digits/underscore,
 # Unicode-aware, so Cyrillic is preserved) and not whitespace — i.e. punctuation.
@@ -26,29 +28,30 @@ _EXCESS_NEWLINES_RE = re.compile(r"\n{3,}")
 
 DEFAULT_LOG_FILE = Path("data/app.log")
 
-# Common Russian stop-words (function words carrying no retrieval signal).
-# Tokens are checked against this set both as-is and after lemmatization, so
-# base forms here (я, весь, этот, ...) also filter their inflected variants.
-RUSSIAN_STOP_WORDS = frozenset(
-    # A whitespace-delimited block stays readable and diff-friendly for a
-    # 150-word list, unlike the one-quoted-string-per-word literal SIM905 wants.
-    """
-    а бы был была были было быть в вам вас вдруг ведь во вот впрочем все всегда
-    всего всех всю вы г где да даже два для до другой его ее ей ему если есть
-    еще ж же за зачем здесь и из или им иногда их к как какая какой когда
-    конечно который кто куда ли лучше между меня мне много может можно мой моя
-    мы на над надо наконец нас не него нее ней нельзя нет ни нибудь никогда ним
-    них ничего но ну о об один он она они оно опять от перед по под после потом
-    потому почти при про раз разве с сам свой себе себя сейчас со совсем так
-    такой там тебя тем теперь то тогда того тоже только том тот три тут ты у
-    уж уже хоть хорошо чего чем через что чтоб чтобы чуть эти этого этой этом
-    этот эту я
-    """.split()  # noqa: SIM905
-)
-
 # The morphological analyzer is heavyweight (loads the Russian dictionaries),
 # so it is created lazily on first tokenization, not at import time.
 _morph_analyzer: pymorphy3.MorphAnalyzer | None = None
+
+
+@lru_cache(maxsize=1)
+def russian_stop_words() -> frozenset[str]:
+    """NLTK's official Russian stop-word list, fetched lazily.
+
+    The ``stopwords`` corpus is downloaded on first use when missing from the
+    local NLTK data directory; afterwards the set is served from cache.
+    Tokens are checked against this set both as-is and after lemmatization,
+    so base forms in the list (я, весь, этот, ...) also filter their
+    inflected variants.
+
+    Returns:
+        Frozen set of lowercase Russian stop-words.
+    """
+    try:
+        words = stopwords.words("russian")
+    except LookupError:
+        nltk.download("stopwords", quiet=True)
+        words = stopwords.words("russian")
+    return frozenset(words)
 
 
 def _build_markdown_converter() -> html2text.HTML2Text:
@@ -121,8 +124,9 @@ def tokenize(text: str) -> list[str]:
     """Split text into lemma tokens for BM25, dropping Russian stop-words.
 
     Pipeline: :func:`normalize_text` (lowercase, punctuation removal) ->
-    whitespace split -> stop-word filter -> :func:`lemmatize` -> stop-word
-    filter on the lemma (catches inflected forms of stop-words).
+    whitespace split -> stop-word filter (:func:`russian_stop_words`) ->
+    :func:`lemmatize` -> stop-word filter on the lemma (catches inflected
+    forms of stop-words).
 
     Args:
         text: Raw input string.
@@ -133,12 +137,13 @@ def tokenize(text: str) -> list[str]:
     normalized = normalize_text(text)
     if not normalized:
         return []
+    stop_words = russian_stop_words()
     tokens: list[str] = []
     for token in normalized.split():
-        if token in RUSSIAN_STOP_WORDS:
+        if token in stop_words:
             continue
         lemma = lemmatize(token)
-        if lemma not in RUSSIAN_STOP_WORDS:
+        if lemma not in stop_words:
             tokens.append(lemma)
     return tokens
 
