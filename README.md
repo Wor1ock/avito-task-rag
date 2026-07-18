@@ -29,11 +29,11 @@ uv run pre-commit install
 Для запуска пайплайна выполните команду в терминале:
 
 ```bash
-set PYTHONUTF8=1
+export PYTHONUTF8=1  # в Windows cmd: set PYTHONUTF8=1
 # запуск решения
 uv run main.py
 
-# nекстовый отчет об ошибках на calibration.f
+# текстовый отчет об ошибках на calibration.f
 uv run python -m src.analysis
 
 # запуск локального дашборда phoenix для анализа ошибок
