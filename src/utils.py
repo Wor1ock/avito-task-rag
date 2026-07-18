@@ -85,6 +85,39 @@ def html_to_markdown(html_text: str) -> str:
     return _EXCESS_NEWLINES_RE.sub("\n\n", markdown).strip()
 
 
+def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
+    """Split text into character windows of ``chunk_size`` sharing ``chunk_overlap``.
+
+    Windows advance by ``chunk_size - chunk_overlap`` characters, so every
+    chunk repeats the tail of its predecessor and sentences cut by a boundary
+    stay intact in at least one chunk.
+
+    Args:
+        text: Input string.
+        chunk_size: Window length in characters.
+        chunk_overlap: Characters shared between consecutive windows.
+
+    Returns:
+        Stripped non-empty chunks in document order; empty list for blank input.
+
+    Raises:
+        ValueError: If ``chunk_overlap`` is not smaller than ``chunk_size``.
+    """
+    if chunk_overlap >= chunk_size:
+        raise ValueError(f"chunk_overlap ({chunk_overlap}) must be smaller than chunk_size ({chunk_size})")
+    step = chunk_size - chunk_overlap
+    chunks: list[str] = []
+    for start in range(0, len(text), step):
+        chunk = text[start : start + chunk_size].strip()
+        if chunk:
+            chunks.append(chunk)
+        # The window reached the end of the text: further starts would only
+        # produce suffixes of this chunk.
+        if start + chunk_size >= len(text):
+            break
+    return chunks
+
+
 def normalize_text(text: str) -> str:
     """Lowercase text and strip punctuation, collapsing repeated whitespace.
 

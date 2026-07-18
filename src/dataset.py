@@ -16,7 +16,7 @@ from pathlib import Path
 import pandas as pd
 from pydantic import BaseModel
 
-from src.utils import html_to_markdown, tokenize
+from src.utils import chunk_text, html_to_markdown, tokenize
 
 logger = logging.getLogger("rag.dataset")
 
@@ -25,6 +25,10 @@ logger = logging.getLogger("rag.dataset")
 # carry more weight in term frequencies and embeddings, and the field markers
 # give the encoder an explicit document structure.
 ENRICHED_TEXT_TEMPLATE = "Title: {title} | Topic: {title} | Content: {body}"
+
+# Chunk-level document template for the dense index: every chunk carries its
+# article title so the encoder keeps document context after the body is split.
+CHUNK_TEXT_TEMPLATE = "Title: {title} | Content: {chunk}"
 
 
 class Article(BaseModel):
@@ -115,6 +119,10 @@ class ArticleDataset:
         # Memoized enriched corpus; rendered at most once per loaded corpus
         # (shared by BM25 tokenization, dense encoding, and the reranker).
         self._enriched_corpus: list[str] | None = None
+        # Memoized chunked corpus, keyed by the (chunk_size, chunk_overlap)
+        # pair it was rendered with.
+        self._chunked_corpus: tuple[list[str], list[int]] | None = None
+        self._chunk_params: tuple[int, int] | None = None
 
     def __len__(self) -> int:
         return len(self.articles)
@@ -145,6 +153,8 @@ class ArticleDataset:
             for row in df.itertuples(index=False)
         ]
         self._enriched_corpus = None
+        self._chunked_corpus = None
+        self._chunk_params = None
         logger.info("Parsed %d articles (HTML -> Markdown) from %s", len(self.articles), file_path)
 
     def get_enriched_text(self, article: Article) -> str:
@@ -172,6 +182,43 @@ class ArticleDataset:
         if self._enriched_corpus is None:
             self._enriched_corpus = [self.get_enriched_text(article) for article in self.articles]
         return self._enriched_corpus
+
+    def get_chunked_corpus(self, chunk_size: int, chunk_overlap: int) -> tuple[list[str], list[int]]:
+        """Title-prefixed Markdown chunks of every article with parent article ids.
+
+        Each article's Markdown body is split by :func:`src.utils.chunk_text`
+        and every chunk is rendered through :data:`CHUNK_TEXT_TEMPLATE`, so the
+        title context travels with each chunk into the dense index. An article
+        whose body yields no chunks still contributes one title-only chunk,
+        keeping every article reachable through dense retrieval. Memoized per
+        ``(chunk_size, chunk_overlap)`` pair.
+
+        Args:
+            chunk_size: Chunk window length in characters (``model.chunk_size``).
+            chunk_overlap: Characters shared between consecutive chunks
+                (``model.chunk_overlap``).
+
+        Returns:
+            ``(chunks, parent_article_ids)`` aligned lists: ``parent_article_ids[i]``
+            is the ``article_id`` of the article ``chunks[i]`` was cut from.
+        """
+        if self._chunked_corpus is None or self._chunk_params != (chunk_size, chunk_overlap):
+            chunks: list[str] = []
+            parents: list[int] = []
+            for article in self.articles:
+                for body_chunk in chunk_text(article.text, chunk_size, chunk_overlap) or [""]:
+                    chunks.append(CHUNK_TEXT_TEMPLATE.format(title=article.title, chunk=body_chunk))
+                    parents.append(article.article_id)
+            self._chunked_corpus = (chunks, parents)
+            self._chunk_params = (chunk_size, chunk_overlap)
+            logger.info(
+                "Chunked %d articles into %d chunks (size=%d, overlap=%d)",
+                len(self.articles),
+                len(chunks),
+                chunk_size,
+                chunk_overlap,
+            )
+        return self._chunked_corpus
 
     def get_tokenized_corpus(self) -> list[list[str]]:
         """Normalized token lists of the enriched corpus (BM25 input).
