@@ -7,7 +7,7 @@ defaults:
   - _self_
 
 # Number of candidates retrieved by each first-stage retriever (BM25 / FAISS).
-top_k_candidates: 100
+top_k_candidates: 250
 # Number of documents returned after fusion / re-ranking.
 top_k_final: 10
 
@@ -15,8 +15,8 @@ top_k_final: 10
 hybrid:
   # Reciprocal Rank Fusion constant: score = sum(weight / (rrf_k + rank)).
   rrf_k: 30
-  bm25_weight: 0.4
-  dense_weight: 0.6
+  bm25_weight: 0
+  dense_weight: 1
 
 # Optional cross-encoder re-ranking stage (disabled in the baseline).
 reranker:
