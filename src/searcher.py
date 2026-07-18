@@ -7,9 +7,9 @@ Pipeline per query:
        deduplicate chunk hits to their parent articles (best chunk wins).
     3. Fusion: weighted RRF over both article rankings
        (``score = sum(weight / (rrf_k + rank))``).
-    4. Optional reranking: when enabled, score (query, enriched document)
-       pairs with a cross-encoder and re-sort the fused candidates.
-    5. Final ranking: top article_ids by fused (or reranker) score.
+    4. Optional reranking: when enabled, score (raw query, best-matching
+       chunk) pairs with a cross-encoder and re-sort the fused candidates.
+    5. Final ranking: top parent article_ids by fused (or reranker) score.
 """
 
 from __future__ import annotations
@@ -58,8 +58,9 @@ class HybridSearcher:
         Args:
             dataset: Loaded article dataset (source of candidate texts; must be
                 the same corpus, in the same order, the indexes were built on).
-            encoder: Indexer whose bi-encoder encodes queries; must be configured
-                identically to the one that built the FAISS index.
+            encoder: Indexer whose bi-encoder encodes queries; its model and
+                chunking parameters must match the ones the FAISS index was
+                built with.
             bm25_path: Persisted BM25 artifact (pickled index + article_ids).
             faiss_path: Persisted FAISS index.
             rrf_k: Reciprocal Rank Fusion constant (``hybrid.rrf_k``).
@@ -91,7 +92,9 @@ class HybridSearcher:
         self.chunk_article_ids: list[int] = []
         # FAISS chunk position -> position of the parent article in article_ids.
         self._chunk_parent_positions: list[int] = []
-        self._enriched_corpus: list[str] = []
+        # Parent article position -> its FAISS chunk positions.
+        self._article_chunk_indices: dict[int, list[int]] = {}
+        self._chunk_corpus: list[str] = []
         self.reranker: CrossEncoder | None = None
         self.load_index()
 
@@ -127,16 +130,17 @@ class HybridSearcher:
             raise ValueError("Dataset article order does not match the saved index mapping; rebuild the index")
         if self.faiss_index.ntotal != len(self.chunk_article_ids):
             raise ValueError("FAISS index size does not match the saved chunk mapping; rebuild the index")
-        _, derived_parents = self.dataset.get_chunked_corpus(self._encoder.chunk_size, self._encoder.chunk_overlap)
+        chunks, derived_parents = self.dataset.get_chunked_corpus(self._encoder.chunk_size, self._encoder.chunk_overlap)
         if derived_parents != self.chunk_article_ids:
             raise ValueError("Dataset chunking does not match the saved chunk mapping; rebuild the index")
+        self._chunk_corpus = chunks
         article_positions = {article_id: pos for pos, article_id in enumerate(self.article_ids)}
         self._chunk_parent_positions = [article_positions[article_id] for article_id in self.chunk_article_ids]
+        self._article_chunk_indices = {}
+        for chunk_idx, position in enumerate(self._chunk_parent_positions):
+            self._article_chunk_indices.setdefault(position, []).append(chunk_idx)
 
         if self.reranker_enabled:
-            # The enriched corpus is only consumed by the rerank stage; skip
-            # rendering it entirely when reranking is disabled.
-            self._enriched_corpus = self.dataset.get_enriched_corpus()
             start = time.perf_counter()
             # max_length caps the (query, document) pair at 512 tokens: without
             # it the tokenizer pads/attends up to the model maximum (8192 for
@@ -152,14 +156,13 @@ class HybridSearcher:
         top_k = min(top_k, len(scores))
         return np.argsort(scores)[::-1][:top_k].tolist()
 
-    def _search_semantic(self, query: str, top_k: int) -> list[int]:
+    def _search_semantic(self, query_vec: np.ndarray, top_k: int) -> list[int]:
         """Top ``top_k`` article corpus positions by best-chunk similarity (decreasing).
 
         FAISS ranks chunks; hits are deduplicated to their parent article,
         which keeps the rank of its best chunk. The fetch depth doubles until
         ``top_k`` distinct articles are covered or the index is exhausted.
         """
-        query_vec = self._encoder.encode([query])
         ntotal = self.faiss_index.ntotal
         fetch = min(top_k * 4, ntotal)
         while True:
@@ -176,6 +179,18 @@ class HybridSearcher:
             if len(positions) >= top_k or fetch >= ntotal:
                 return positions[:top_k]
             fetch = min(fetch * 2, ntotal)
+
+    def _best_chunk_index(self, position: int, query_vec: np.ndarray) -> int:
+        """FAISS position of the chunk of article ``position`` closest to the query.
+
+        Computed exactly over the article's stored chunk embeddings, so it
+        works for candidates that entered the pool through BM25 as well.
+        """
+        chunk_indices = self._article_chunk_indices[position]
+        if len(chunk_indices) == 1:
+            return chunk_indices[0]
+        vectors = np.stack([self.faiss_index.reconstruct(chunk_idx) for chunk_idx in chunk_indices])
+        return chunk_indices[int(np.argmax(vectors @ query_vec[0]))]
 
     def _fuse(self, rankings: list[tuple[float, list[int]]]) -> list[tuple[int, float]]:
         """Weighted Reciprocal Rank Fusion over ranked corpus-index lists.
@@ -222,12 +237,14 @@ class HybridSearcher:
 
         Returns:
             ``(article_id, score)`` pairs ordered by decreasing score, where the
-            score is the cross-encoder relevance when reranking is enabled and
-            the fused RRF score otherwise. Length <= ``top_k_final``.
+            score is the cross-encoder relevance of the article's best-matching
+            chunk when reranking is enabled and the fused RRF score otherwise.
+            Length <= ``top_k_final``.
         """
         start = time.perf_counter()
         lexical = self._search_lexical(query, top_k_candidates)
-        semantic = self._search_semantic(query, top_k_candidates)
+        query_vec = self._encoder.encode([query])
+        semantic = self._search_semantic(query_vec, top_k_candidates)
         candidates = self._fuse([(self.bm25_weight, lexical), (self.dense_weight, semantic)])
 
         if self.reranker is not None:
@@ -235,7 +252,12 @@ class HybridSearcher:
             indices = [corpus_idx for corpus_idx, _ in candidates[:rerank_depth]]
             remaining_candidates = candidates[rerank_depth:]
 
-            pairs = [[query, self._enriched_corpus[corpus_idx]] for corpus_idx in indices]
+            # Each candidate article is represented by its best-matching chunk,
+            # so the cross-encoder judges the passage most likely to answer the
+            # query instead of a truncated full document.
+            pairs = [
+                [query, self._chunk_corpus[self._best_chunk_index(corpus_idx, query_vec)]] for corpus_idx in indices
+            ]
             ce_scores = self.reranker.predict(pairs, batch_size=32, show_progress_bar=False)
 
             reranked_candidates = sorted(

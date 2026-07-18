@@ -116,8 +116,8 @@ class ArticleDataset:
 
     def __init__(self) -> None:
         self.articles: list[Article] = []
-        # Memoized enriched corpus; rendered at most once per loaded corpus
-        # (shared by BM25 tokenization, dense encoding, and the reranker).
+        # Memoized enriched corpus (BM25 tokenization input); rendered at most
+        # once per loaded corpus.
         self._enriched_corpus: list[str] | None = None
         # Memoized chunked corpus, keyed by the (chunk_size, chunk_overlap)
         # pair it was rendered with.
@@ -170,11 +170,10 @@ class ArticleDataset:
         return ENRICHED_TEXT_TEMPLATE.format(title=article.title, body=article.text)
 
     def get_enriched_corpus(self) -> list[str]:
-        """Enriched text of every article, in storage order (for dense encoding).
+        """Enriched text of every article, in storage order (BM25 input).
 
-        The result is memoized: repeated calls (BM25 tokenization, dense
-        encoding, reranker candidate texts) reuse the same rendered list until
-        a new corpus is loaded.
+        The result is memoized: repeated calls reuse the same rendered list
+        until a new corpus is loaded.
 
         Returns:
             One enriched string per article.
