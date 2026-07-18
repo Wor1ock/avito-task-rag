@@ -1,6 +1,6 @@
 # Bi-encoder used for both corpus and query embeddings. Must match the model
 # the persisted FAISS index was built with, or the index must be rebuilt.
-bi_encoder: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+bi_encoder: "BAAI/bge-m3"
 # Torch device ("cuda"/"cpu"); null auto-detects.
 device: null
 
@@ -8,10 +8,10 @@ device: null
 batch_size: 64
 # Article Markdown is split into overlapping character windows before dense
 # encoding. Changing either value requires rebuilding the FAISS index.
-chunk_size: 500
-chunk_overlap: 50
-# Encoder input truncation length. 512 is the MiniLM maximum; anything lower
-# blinds the dense index to article content beyond the truncation point.
-# Changing this requires rebuilding the FAISS index.
-max_seq_length: 512
+chunk_size: 1500
+chunk_overlap: 200
+# Encoder input truncation length. bge-m3 natively supports up to 8192
+# tokens; 1024 comfortably covers a 1500-char chunk while keeping CPU
+# encoding tractable. Changing this requires rebuilding the FAISS index.
+max_seq_length: 1024
 normalize_embeddings: true
