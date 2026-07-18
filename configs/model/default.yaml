@@ -6,5 +6,8 @@ device: null
 
 # Encoding parameters.
 batch_size: 64
-max_seq_length: 128
+# Encoder input truncation length. 512 is the MiniLM maximum; anything lower
+# blinds the dense index to article content beyond the truncation point.
+# Changing this requires rebuilding the FAISS index.
+max_seq_length: 512
 normalize_embeddings: true
