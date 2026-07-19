@@ -314,6 +314,8 @@ def build_first_stage_searcher(dataset: ArticleDataset, config: AppConfig) -> Hy
         device=config.model.device,
         max_seq_length=config.model.max_seq_length,
         normalize_embeddings=config.model.normalize_embeddings,
+        chunk_size=config.model.chunk_size,
+        chunk_overlap=config.model.chunk_overlap,
     )
     return HybridSearcher(
         dataset=dataset,
