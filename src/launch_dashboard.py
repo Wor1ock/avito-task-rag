@@ -325,6 +325,7 @@ def build_first_stage_searcher(dataset: ArticleDataset, config: AppConfig) -> Hy
         rrf_k=config.hybrid.rrf_k,
         bm25_weight=config.hybrid.bm25_weight,
         dense_weight=config.hybrid.dense_weight,
+        aggregation_strategy=config.aggregation.strategy,
         reranker_enabled=False,
     )
 

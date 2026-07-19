@@ -4,7 +4,8 @@ Pipeline per query:
 
     1. Lexical: tokenize the query and take the top BM25 candidates.
     2. Semantic: encode the raw query, search the chunk-level FAISS index, and
-       deduplicate chunk hits to their parent articles (best chunk wins).
+       aggregate chunk similarities to their parent articles with the
+       configured strategy (max_p / avg_p / sum_p).
     3. Fusion: weighted RRF over both article rankings
        (``score = sum(weight / (rrf_k + rank))``).
     4. Optional reranking: when enabled, score (raw query, best-matching
@@ -17,6 +18,7 @@ from __future__ import annotations
 import logging
 import pickle
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import faiss
@@ -30,6 +32,14 @@ from src.utils import tokenize
 logger = logging.getLogger("rag.searcher")
 
 DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-base"
+
+# Chunk-to-article score aggregation strategies for the dense branch: an
+# article's score is derived from the similarities of its retrieved chunks.
+CHUNK_AGGREGATORS: dict[str, Callable[[list[float]], float]] = {
+    "max_p": max,
+    "avg_p": lambda scores: sum(scores) / len(scores),
+    "sum_p": sum,
+}
 
 
 class HybridSearcher:
@@ -49,6 +59,7 @@ class HybridSearcher:
         rrf_k: float,
         bm25_weight: float,
         dense_weight: float,
+        aggregation_strategy: str = "max_p",
         reranker_enabled: bool = False,
         reranker_name: str | None = None,
         rerank_depth: int = 15,
@@ -66,6 +77,9 @@ class HybridSearcher:
             rrf_k: Reciprocal Rank Fusion constant (``hybrid.rrf_k``).
             bm25_weight: RRF weight of the lexical ranking (``hybrid.bm25_weight``).
             dense_weight: RRF weight of the semantic ranking (``hybrid.dense_weight``).
+            aggregation_strategy: How chunk similarities are aggregated into
+                a parent-article score in the dense branch
+                (``aggregation.strategy``); one of :data:`CHUNK_AGGREGATORS`.
             reranker_enabled: Whether to re-rank fused candidates with a
                 cross-encoder.
             reranker_name: Cross-encoder checkpoint; defaults to
@@ -81,6 +95,11 @@ class HybridSearcher:
         self.rrf_k = rrf_k
         self.bm25_weight = bm25_weight
         self.dense_weight = dense_weight
+        if aggregation_strategy not in CHUNK_AGGREGATORS:
+            raise ValueError(
+                f"Unknown aggregation strategy {aggregation_strategy!r}; expected one of {sorted(CHUNK_AGGREGATORS)}"
+            )
+        self.aggregation_strategy = aggregation_strategy
         self.reranker_enabled = reranker_enabled
         self.reranker_name = reranker_name or DEFAULT_RERANKER_MODEL
         self.rerank_depth = rerank_depth
@@ -157,27 +176,31 @@ class HybridSearcher:
         return np.argsort(scores)[::-1][:top_k].tolist()
 
     def _search_semantic(self, query_vec: np.ndarray, top_k: int) -> list[int]:
-        """Top ``top_k`` article corpus positions by best-chunk similarity (decreasing).
+        """Top ``top_k`` article corpus positions by aggregated chunk score (decreasing).
 
-        FAISS ranks chunks; hits are deduplicated to their parent article,
-        which keeps the rank of its best chunk. The fetch depth doubles until
-        ``top_k`` distinct articles are covered or the index is exhausted.
+        FAISS ranks chunks; each parent article is scored by aggregating the
+        similarities of its retrieved chunks with the configured strategy
+        (``max_p``: best chunk, ``avg_p``: mean, ``sum_p``: sum — the latter
+        two computed over the chunks visible at the final fetch depth). The
+        fetch depth doubles until ``top_k`` distinct articles are covered or
+        the index is exhausted.
         """
         ntotal = self.faiss_index.ntotal
+        aggregate = CHUNK_AGGREGATORS[self.aggregation_strategy]
         fetch = min(top_k * 4, ntotal)
         while True:
-            _, indices = self.faiss_index.search(query_vec, fetch)
-            positions: list[int] = []
-            seen: set[int] = set()
-            for chunk_idx in indices[0]:
+            scores, indices = self.faiss_index.search(query_vec, fetch)
+            chunk_scores: dict[int, list[float]] = {}
+            for score, chunk_idx in zip(scores[0], indices[0], strict=True):
                 if chunk_idx == -1:
                     continue
-                position = self._chunk_parent_positions[chunk_idx]
-                if position not in seen:
-                    seen.add(position)
-                    positions.append(position)
-            if len(positions) >= top_k or fetch >= ntotal:
-                return positions[:top_k]
+                chunk_scores.setdefault(self._chunk_parent_positions[chunk_idx], []).append(float(score))
+            if len(chunk_scores) >= top_k or fetch >= ntotal:
+                ranked = sorted(
+                    chunk_scores.items(),
+                    key=lambda item: (-aggregate(item[1]), item[0]),
+                )
+                return [position for position, _ in ranked[:top_k]]
             fetch = min(fetch * 2, ntotal)
 
     def _best_chunk_index(self, position: int, query_vec: np.ndarray) -> int:

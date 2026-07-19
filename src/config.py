@@ -8,6 +8,7 @@ and accessed through typed attributes instead of raw ``DictConfig`` keys.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -52,6 +53,12 @@ class HybridConfig(BaseModel):
     dense_weight: float = Field(ge=0)
 
 
+class AggregationConfig(BaseModel):
+    """Chunk-to-article score aggregation in the dense retrieval branch."""
+
+    strategy: Literal["max_p", "avg_p", "sum_p"] = "max_p"
+
+
 class RerankerConfig(BaseModel):
     """Optional cross-encoder re-ranking stage."""
 
@@ -84,6 +91,7 @@ class AppConfig(BaseModel):
     top_k_candidates: int = Field(gt=0)
     top_k_final: int = Field(gt=0)
     hybrid: HybridConfig
+    aggregation: AggregationConfig = Field(default_factory=AggregationConfig)
     reranker: RerankerConfig
     sampling: SamplingConfig
     seed: int

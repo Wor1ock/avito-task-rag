@@ -18,6 +18,13 @@ hybrid:
   bm25_weight: 0
   dense_weight: 1
 
+# Chunk-to-article score aggregation in the dense branch: an article is
+# scored from its retrieved chunks' similarities before RRF fusion.
+aggregation:
+  # One of: max_p (best chunk), avg_p (mean over retrieved chunks),
+  # sum_p (sum over retrieved chunks).
+  strategy: max_p
+
 # Optional cross-encoder re-ranking stage (disabled in the baseline).
 reranker:
   enabled: true

@@ -88,6 +88,7 @@ def build_searcher(dataset: ArticleDataset, config: AppConfig) -> HybridSearcher
         "rrf_k": config.hybrid.rrf_k,
         "bm25_weight": config.hybrid.bm25_weight,
         "dense_weight": config.hybrid.dense_weight,
+        "aggregation_strategy": config.aggregation.strategy,
         "reranker_enabled": config.reranker.enabled,
         "reranker_name": config.reranker.model_name,
         "rerank_depth": config.reranker.rerank_depth,
