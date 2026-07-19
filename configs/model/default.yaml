@@ -1,17 +1,16 @@
-# Bi-encoder used for both corpus and query embeddings. Must match the model
-# the persisted FAISS index was built with, or the index must be rebuilt.
+# би-энкодер для эмбеддингов корпуса и запросов. должен совпадать с моделью,
+# на которой строился сохранённый индекс FAISS, иначе индекс нужно перестроить
 bi_encoder: "BAAI/bge-m3"
-# Torch device ("cuda"/"cpu"); null auto-detects.
+# устройство torch ("cuda"/"cpu"); null — автоопределение
 device: null
 
-# Encoding parameters.
 batch_size: 64
-# Article Markdown is split into overlapping character windows before dense
-# encoding. Changing either value requires rebuilding the FAISS index.
+# Markdown статьи режется на перекрывающиеся символьные окна перед плотным
+# кодированием. изменение любого значения требует перестройки индекса FAISS
 chunk_size: 1500
 chunk_overlap: 200
-# Encoder input truncation length. bge-m3 natively supports up to 8192
-# tokens; 1024 comfortably covers a 1500-char chunk while keeping CPU
-# encoding tractable. Changing this requires rebuilding the FAISS index.
+# длина усечения входа энкодера. bge-m3 нативно держит до 8192 токенов;
+# 1024 с запасом покрывает чанк в 1500 символов и оставляет кодирование на CPU
+# приемлемым по скорости. изменение требует перестройки индекса FAISS
 max_seq_length: 1024
 normalize_embeddings: true

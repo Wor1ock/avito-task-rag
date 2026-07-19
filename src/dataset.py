@@ -1,9 +1,9 @@
-"""Data management layer: article loading, validation, and text enrichment.
+"""слой работы с данными: загрузка статей, валидация и обогащение текста.
 
-Pipeline: Feather articles -> HTML-to-Markdown conversion -> pydantic
-validation -> enriched text (title boosting) -> normalized token corpus for
-lexical (BM25) and semantic indexing. Also hosts the shared Feather table
-loader used for the calibration and test query sets.
+пайплайн: статьи из feather -> конвертация HTML в Markdown -> валидация
+pydantic -> обогащённый текст (усиление заголовка) -> нормализованный корпус
+токенов для лексического (BM25) и семантического индексов. здесь же общий
+загрузчик feather-таблиц для калибровочного и тестового наборов запросов.
 """
 
 from __future__ import annotations
@@ -20,51 +20,35 @@ from src.utils import chunk_text, html_to_markdown, tokenize
 
 logger = logging.getLogger("rag.dataset")
 
-# Title-boosted document template fed to both BM25 tokenization and the
-# bi-encoder: the title appears twice (as "Title" and "Topic") so its words
-# carry more weight in term frequencies and embeddings, and the field markers
-# give the encoder an explicit document structure.
+# шаблон документа с усилением заголовка для BM25 и би-энкодера: заголовок
+# повторяется дважды ("Title" и "Topic"), чтобы его слова весили больше в
+# частотах термов и эмбеддингах, а маркеры полей задают явную структуру документа
 ENRICHED_TEXT_TEMPLATE = "Title: {title} | Topic: {title} | Content: {body}"
 
-# Chunk-level document template for the dense index: every chunk carries its
-# article title so the encoder keeps document context after the body is split.
+# шаблон чанка для плотного индекса: каждый чанк несёт заголовок статьи,
+# чтобы энкодер сохранял контекст документа после разбиения тела
 CHUNK_TEXT_TEMPLATE = "Title: {title} | Content: {chunk}"
 
 
 class Article(BaseModel):
-    """A single help-center article."""
-
     article_id: int
     title: str
     text: str
 
 
 def load_feather_table(file_path: str | Path, required_columns: Sequence[str]) -> pd.DataFrame:
-    """Load a Feather table and validate its schema.
-
-    Args:
-        file_path: Path to the ``.f`` / ``.feather`` file.
-        required_columns: Columns that must be present.
-
-    Returns:
-        The loaded dataframe.
-
-    Raises:
-        FileNotFoundError: If ``file_path`` does not exist.
-        ValueError: If any required column is missing.
-    """
     path = Path(file_path)
     if not path.exists():
         raise FileNotFoundError(f"Feather file not found: {path}")
     with warnings.catch_warnings():
-        # pandas delegates to pyarrow.feather.read_feather, deprecated in pyarrow 24
-        # in favor of the IPC reader; silence the noise until pandas migrates.
+        # pandas вызывает pyarrow.feather.read_feather, устаревший в pyarrow 24
+        # в пользу IPC-ридера; глушим предупреждение, пока pandas не мигрирует
         warnings.simplefilter("ignore", FutureWarning)
         df = pd.read_feather(path)
     missing = [column for column in required_columns if column not in df.columns]
     if missing:
         raise ValueError(f"{path} is missing required columns {missing}; found {list(df.columns)}")
-    logger.info("Loaded %d rows from %s (columns: %s)", len(df), path, list(df.columns))
+    logger.info("загружено %d строк из %s (колонки: %s)", len(df), path, list(df.columns))
     return df
 
 
@@ -74,25 +58,6 @@ def sample_table(
     sample_size: int | None = None,
     random_state: int = 42,
 ) -> pd.DataFrame:
-    """Reproducibly subsample a query table (calibration/test) for faster runs.
-
-    A fixed ``random_state`` guarantees the same rows are selected on every
-    run, so validation numbers stay comparable across iterations. Row order
-    of the original table is preserved. Never apply this to the articles
-    corpus — the persisted indexes cover the full corpus.
-
-    Args:
-        df: Table to subsample.
-        sample_frac: Fraction of rows to keep, in (0, 1]. Ignored when
-            ``sample_size`` is given.
-        sample_size: Absolute number of rows to keep (capped at ``len(df)``);
-            takes precedence over ``sample_frac``.
-        random_state: Seed for pandas' sampler.
-
-    Returns:
-        The sampled table with a reset index, or ``df`` unchanged when both
-        ``sample_frac`` and ``sample_size`` are None.
-    """
     if sample_frac is None and sample_size is None:
         return df
     if sample_size is not None:
@@ -101,7 +66,7 @@ def sample_table(
         sampled = df.sample(frac=sample_frac, random_state=random_state)
     sampled = sampled.sort_index().reset_index(drop=True)
     logger.info(
-        "Sampled %d of %d rows (frac=%s, size=%s, random_state=%d)",
+        "отобрано %d из %d строк (frac=%s, size=%s, random_state=%d)",
         len(sampled),
         len(df),
         sample_frac,
@@ -112,15 +77,13 @@ def sample_table(
 
 
 class ArticleDataset:
-    """In-memory article store with validation and enrichment helpers."""
-
     def __init__(self) -> None:
         self.articles: list[Article] = []
-        # Memoized enriched corpus (BM25 tokenization input); rendered at most
-        # once per loaded corpus.
+        # мемоизированный обогащённый корпус (вход токенизации BM25);
+        # рендерится не более одного раза на загруженный корпус
         self._enriched_corpus: list[str] | None = None
-        # Memoized chunked corpus, keyed by the (chunk_size, chunk_overlap)
-        # pair it was rendered with.
+        # мемоизированный чанкованный корпус с ключом по паре
+        # (chunk_size, chunk_overlap), с которой он был построен
         self._chunked_corpus: tuple[list[str], list[int]] | None = None
         self._chunk_params: tuple[int, int] | None = None
 
@@ -128,21 +91,6 @@ class ArticleDataset:
         return len(self.articles)
 
     def load_from_feather(self, file_path: str | Path) -> None:
-        """Load articles from a Feather file, converting the HTML ``body`` to Markdown.
-
-        Expects ``article_id``, ``title``, and ``body`` columns; ``body`` is
-        passed through :func:`src.utils.html_to_markdown` before validation,
-        so the indexing corpuses are built over structured Markdown text
-        (lists and tables keep their layout).
-
-        Args:
-            file_path: Path to the articles ``.f`` file.
-
-        Raises:
-            FileNotFoundError: If ``file_path`` does not exist.
-            ValueError: If required columns are missing.
-            pydantic.ValidationError: If any row fails schema validation.
-        """
         df = load_feather_table(file_path, required_columns=("article_id", "title", "body"))
         self.articles = [
             Article(
@@ -155,52 +103,17 @@ class ArticleDataset:
         self._enriched_corpus = None
         self._chunked_corpus = None
         self._chunk_params = None
-        logger.info("Parsed %d articles (HTML -> Markdown) from %s", len(self.articles), file_path)
+        logger.info("распарсено %d статей (HTML -> Markdown) из %s", len(self.articles), file_path)
 
     def get_enriched_text(self, article: Article) -> str:
-        """Render the title-boosted document string fed to both indexes.
-
-        Args:
-            article: Validated article.
-
-        Returns:
-            :data:`ENRICHED_TEXT_TEMPLATE` filled with the article's title
-            (twice) and its Markdown body.
-        """
         return ENRICHED_TEXT_TEMPLATE.format(title=article.title, body=article.text)
 
     def get_enriched_corpus(self) -> list[str]:
-        """Enriched text of every article, in storage order (BM25 input).
-
-        The result is memoized: repeated calls reuse the same rendered list
-        until a new corpus is loaded.
-
-        Returns:
-            One enriched string per article.
-        """
         if self._enriched_corpus is None:
             self._enriched_corpus = [self.get_enriched_text(article) for article in self.articles]
         return self._enriched_corpus
 
     def get_chunked_corpus(self, chunk_size: int, chunk_overlap: int) -> tuple[list[str], list[int]]:
-        """Title-prefixed Markdown chunks of every article with parent article ids.
-
-        Each article's Markdown body is split by :func:`src.utils.chunk_text`
-        and every chunk is rendered through :data:`CHUNK_TEXT_TEMPLATE`, so the
-        title context travels with each chunk into the dense index. An article
-        whose body yields no chunks still contributes one title-only chunk,
-        keeping every article reachable through dense retrieval. Memoized per
-        ``(chunk_size, chunk_overlap)`` pair.
-
-        Args:
-            chunk_size: Chunk window length in characters (``model.chunk_size``).
-            chunk_overlap: Characters shared between consecutive chunks
-                (``model.chunk_overlap``).
-
-        Returns:
-            ``(chunks, parent_article_ids)`` aligned lists: ``parent_article_ids[i]``
-            is the ``article_id`` of the article ``chunks[i]`` was cut from.
-        """
         if self._chunked_corpus is None or self._chunk_params != (chunk_size, chunk_overlap):
             chunks: list[str] = []
             parents: list[int] = []
@@ -211,7 +124,7 @@ class ArticleDataset:
             self._chunked_corpus = (chunks, parents)
             self._chunk_params = (chunk_size, chunk_overlap)
             logger.info(
-                "Chunked %d articles into %d chunks (size=%d, overlap=%d)",
+                "нарезано %d статей на %d чанков (size=%d, overlap=%d)",
                 len(self.articles),
                 len(chunks),
                 chunk_size,
@@ -220,13 +133,4 @@ class ArticleDataset:
         return self._chunked_corpus
 
     def get_tokenized_corpus(self) -> list[list[str]]:
-        """Normalized token lists of the enriched corpus (BM25 input).
-
-        Uses :func:`src.utils.tokenize` (lowercasing + punctuation removal +
-        Russian stop-word filtering + lemmatization) on each enriched article
-        text.
-
-        Returns:
-            One token list per article, in storage order.
-        """
         return [tokenize(text) for text in self.get_enriched_corpus()]

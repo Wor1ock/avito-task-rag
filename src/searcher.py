@@ -1,16 +1,16 @@
-"""Multi-stage hybrid retrieval: BM25 + FAISS fused via weighted Reciprocal Rank Fusion.
+"""многостадийный гибридный поиск: BM25 + FAISS со взвешенным Reciprocal Rank Fusion.
 
-Pipeline per query:
+пайплайн на запрос:
 
-    1. Lexical: tokenize the query and take the top BM25 candidates.
-    2. Semantic: encode the raw query, search the chunk-level FAISS index, and
-       aggregate chunk similarities to their parent articles with the
-       configured strategy (max_p / avg_p / sum_p).
-    3. Fusion: weighted RRF over both article rankings
+    1. лексика: токенизация запроса и топ кандидатов BM25.
+    2. семантика: кодирование сырого запроса, поиск по чанковому индексу FAISS
+       и агрегация сходств чанков к родительским статьям выбранной стратегией
+       (max_p / avg_p / sum_p).
+    3. слияние: взвешенный RRF по обоим ранжированиям
        (``score = sum(weight / (rrf_k + rank))``).
-    4. Optional reranking: when enabled, score (raw query, best-matching
-       chunk) pairs with a cross-encoder and re-sort the fused candidates.
-    5. Final ranking: top parent article_ids by fused (or reranker) score.
+    4. опциональный реранкинг: кросс-энкодер оценивает пары (сырой запрос,
+       лучший чанк статьи) и пересортировывает слитых кандидатов.
+    5. финал: топ article_id по слитому (или реранкерному) скору.
 """
 
 from __future__ import annotations
@@ -33,8 +33,8 @@ logger = logging.getLogger("rag.searcher")
 
 DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-base"
 
-# Chunk-to-article score aggregation strategies for the dense branch: an
-# article's score is derived from the similarities of its retrieved chunks.
+# стратегии агрегации скоров чанков в скор статьи для плотной ветки:
+# скор статьи выводится из сходств её найденных чанков
 CHUNK_AGGREGATORS: dict[str, Callable[[list[float]], float]] = {
     "max_p": max,
     "avg_p": lambda scores: sum(scores) / len(scores),
@@ -43,12 +43,6 @@ CHUNK_AGGREGATORS: dict[str, Callable[[list[float]], float]] = {
 
 
 class HybridSearcher:
-    """Combines lexical and semantic retrieval with weighted RRF fusion.
-
-    A cross-encoder re-ranking stage over the fused candidates is applied only
-    when ``reranker_enabled`` is set.
-    """
-
     def __init__(
         self,
         dataset: ArticleDataset,
@@ -65,30 +59,6 @@ class HybridSearcher:
         rerank_depth: int = 15,
         device: str | None = None,
     ) -> None:
-        """
-        Args:
-            dataset: Loaded article dataset (source of candidate texts; must be
-                the same corpus, in the same order, the indexes were built on).
-            encoder: Indexer whose bi-encoder encodes queries; its model and
-                chunking parameters must match the ones the FAISS index was
-                built with.
-            bm25_path: Persisted BM25 artifact (pickled index + article_ids).
-            faiss_path: Persisted FAISS index.
-            rrf_k: Reciprocal Rank Fusion constant (``hybrid.rrf_k``).
-            bm25_weight: RRF weight of the lexical ranking (``hybrid.bm25_weight``).
-            dense_weight: RRF weight of the semantic ranking (``hybrid.dense_weight``).
-            aggregation_strategy: How chunk similarities are aggregated into
-                a parent-article score in the dense branch
-                (``aggregation.strategy``); one of :data:`CHUNK_AGGREGATORS`.
-            reranker_enabled: Whether to re-rank fused candidates with a
-                cross-encoder.
-            reranker_name: Cross-encoder checkpoint; defaults to
-                :data:`DEFAULT_RERANKER_MODEL` when None and reranking is enabled.
-            rerank_depth: How many top fused candidates the cross-encoder
-                re-scores (``reranker.rerank_depth``); the RRF tail keeps its
-                fusion order.
-            device: Torch device for the reranker; auto-detected when None.
-        """
         self.dataset = dataset
         self.bm25_path = Path(bm25_path)
         self.faiss_path = Path(faiss_path)
@@ -109,23 +79,15 @@ class HybridSearcher:
         self.faiss_index: faiss.Index | None = None
         self.article_ids: list[int] = []
         self.chunk_article_ids: list[int] = []
-        # FAISS chunk position -> position of the parent article in article_ids.
+        # позиция чанка в FAISS -> позиция родительской статьи в article_ids
         self._chunk_parent_positions: list[int] = []
-        # Parent article position -> its FAISS chunk positions.
+        # позиция родительской статьи -> позиции её чанков в FAISS
         self._article_chunk_indices: dict[int, list[int]] = {}
         self._chunk_corpus: list[str] = []
         self.reranker: CrossEncoder | None = None
         self.load_index()
 
     def load_index(self) -> None:
-        """Load persisted artifacts and, when enabled, the reranker model.
-
-        Raises:
-            FileNotFoundError: If the BM25 or FAISS artifact is missing.
-            ValueError: If the dataset's article order or chunking does not
-                match the mappings the indexes were built with (stale
-                artifacts are rebuilt by the caller).
-        """
         with self.bm25_path.open("rb") as f:
             payload = pickle.load(f)
         self.bm25 = payload["bm25"]
@@ -137,7 +99,7 @@ class HybridSearcher:
             raise FileNotFoundError(f"FAISS index not found: {self.faiss_path}")
         self.faiss_index = faiss.read_index(str(self.faiss_path))
         logger.info(
-            "Loaded BM25 (%d docs) from %s and FAISS (%d chunk vectors) from %s",
+            "загружены BM25 (%d документов) из %s и FAISS (%d векторов чанков) из %s",
             self.bm25.corpus_size,
             self.bm25_path,
             self.faiss_index.ntotal,
@@ -161,30 +123,20 @@ class HybridSearcher:
 
         if self.reranker_enabled:
             start = time.perf_counter()
-            # max_length caps the (query, document) pair at 512 tokens: without
-            # it the tokenizer pads/attends up to the model maximum (8192 for
-            # bge-reranker-v2-m3), which is prohibitively slow on CPU.
+            # max_length ограничивает пару (запрос, документ) 512 токенами: без
+            # него токенизатор паддит до максимума модели (8192 у
+            # bge-reranker-v2-m3), что неприемлемо медленно на CPU
             self.reranker = CrossEncoder(self.reranker_name, device=self.device, max_length=512)
-            logger.info("Loaded reranker %s in %.1fs", self.reranker_name, time.perf_counter() - start)
+            logger.info("реранкер %s загружен за %.1f с", self.reranker_name, time.perf_counter() - start)
         else:
-            logger.info("Reranker disabled: final ranking uses RRF fusion scores")
+            logger.info("реранкер отключён: финальное ранжирование по скорам слияния RRF")
 
     def _search_lexical(self, query: str, top_k: int) -> list[int]:
-        """Top ``top_k`` corpus indices by BM25 score (decreasing)."""
         scores = self.bm25.get_scores(tokenize(query))
         top_k = min(top_k, len(scores))
         return np.argsort(scores)[::-1][:top_k].tolist()
 
     def _search_semantic(self, query_vec: np.ndarray, top_k: int) -> list[int]:
-        """Top ``top_k`` article corpus positions by aggregated chunk score (decreasing).
-
-        FAISS ranks chunks; each parent article is scored by aggregating the
-        similarities of its retrieved chunks with the configured strategy
-        (``max_p``: best chunk, ``avg_p``: mean, ``sum_p``: sum — the latter
-        two computed over the chunks visible at the final fetch depth). The
-        fetch depth doubles until ``top_k`` distinct articles are covered or
-        the index is exhausted.
-        """
         ntotal = self.faiss_index.ntotal
         aggregate = CHUNK_AGGREGATORS[self.aggregation_strategy]
         fetch = min(top_k * 4, ntotal)
@@ -204,11 +156,6 @@ class HybridSearcher:
             fetch = min(fetch * 2, ntotal)
 
     def _best_chunk_index(self, position: int, query_vec: np.ndarray) -> int:
-        """FAISS position of the chunk of article ``position`` closest to the query.
-
-        Computed exactly over the article's stored chunk embeddings, so it
-        works for candidates that entered the pool through BM25 as well.
-        """
         chunk_indices = self._article_chunk_indices[position]
         if len(chunk_indices) == 1:
             return chunk_indices[0]
@@ -216,15 +163,6 @@ class HybridSearcher:
         return chunk_indices[int(np.argmax(vectors @ query_vec[0]))]
 
     def _fuse(self, rankings: list[tuple[float, list[int]]]) -> list[tuple[int, float]]:
-        """Weighted Reciprocal Rank Fusion over ranked corpus-index lists.
-
-        Args:
-            rankings: ``(weight, ranked_indices)`` pairs, best-first rankings.
-
-        Returns:
-            ``(corpus_index, fused_score)`` pairs sorted by decreasing score
-            (ties broken by corpus index for determinism).
-        """
         fused: dict[int, float] = {}
         for weight, ranking in rankings:
             for rank, corpus_idx in enumerate(ranking, start=1):
@@ -232,17 +170,6 @@ class HybridSearcher:
         return sorted(fused.items(), key=lambda item: (-item[1], item[0]))
 
     def search(self, query: str, top_k_candidates: int = 100, top_k_final: int = 10) -> list[int]:
-        """Run the full multi-stage pipeline for a single query.
-
-        Args:
-            query: Raw query text.
-            top_k_candidates: Candidates fetched per first-stage retriever.
-            top_k_final: Number of article ids in the final ranking.
-
-        Returns:
-            ``article_id`` list ordered by decreasing relevance,
-            length <= ``top_k_final``.
-        """
         return [article_id for article_id, _ in self.search_with_scores(query, top_k_candidates, top_k_final)]
 
     def search_with_scores(
@@ -251,23 +178,10 @@ class HybridSearcher:
         top_k_candidates: int = 100,
         top_k_final: int = 10,
     ) -> list[tuple[int, float]]:
-        """Like :meth:`search`, but keeps the relevance scores.
-
-        Args:
-            query: Raw query text.
-            top_k_candidates: Candidates fetched per first-stage retriever.
-            top_k_final: Number of article ids in the final ranking.
-
-        Returns:
-            ``(article_id, score)`` pairs ordered by decreasing score, where the
-            score is the cross-encoder relevance of the article's best-matching
-            chunk when reranking is enabled and the fused RRF score otherwise.
-            Length <= ``top_k_final``.
-        """
         start = time.perf_counter()
-        # Only the BM25 path normalizes the query (tokenize() inside
-        # _search_lexical strips punctuation/stop-words and lemmatizes); the
-        # bi-encoder and the reranker both receive the raw query string.
+        # запрос нормализуется только в ветке BM25 (tokenize() внутри
+        # _search_lexical убирает пунктуацию и стоп-слова и лемматизирует);
+        # би-энкодер и реранкер получают сырую строку запроса
         lexical = self._search_lexical(query, top_k_candidates)
         query_vec = self._encoder.encode([query])
         semantic = self._search_semantic(query_vec, top_k_candidates)
@@ -278,9 +192,9 @@ class HybridSearcher:
             indices = [corpus_idx for corpus_idx, _ in candidates[:rerank_depth]]
             remaining_candidates = candidates[rerank_depth:]
 
-            # Each candidate article is represented by its best-matching chunk,
-            # so the cross-encoder judges the passage most likely to answer the
-            # query instead of a truncated full document.
+            # каждая статья-кандидат представлена своим лучшим чанком, поэтому
+            # кросс-энкодер оценивает пассаж, который вероятнее всего отвечает
+            # на запрос, а не усечённый полный документ
             pairs = [
                 [query, self._chunk_corpus[self._best_chunk_index(corpus_idx, query_vec)]] for corpus_idx in indices
             ]
@@ -292,18 +206,18 @@ class HybridSearcher:
                 reverse=True,
             )
 
-            # List order alone decides the final slice (no re-sort below), so the
-            # RRF tail simply backfills after the reranked head when
-            # top_k_final exceeds rerank_depth.
+            # финальный срез определяется только порядком списка (ниже пересортировки
+            # нет), поэтому хвост RRF просто добирается после реранкнутой головы,
+            # когда top_k_final больше rerank_depth
             candidates = reranked_candidates + remaining_candidates
 
         result = [(self.article_ids[corpus_idx], float(score)) for corpus_idx, score in candidates[:top_k_final]]
         logger.info(
-            "Query served in %.2fs (%d lexical + %d semantic -> %d fused candidates, reranker %s)",
+            "запрос обработан за %.2f с (%d лексических + %d семантических -> %d слитых кандидатов, реранкер %s)",
             time.perf_counter() - start,
             len(lexical),
             len(semantic),
             len(candidates),
-            "on" if self.reranker is not None else "off",
+            "вкл" if self.reranker is not None else "выкл",
         )
         return result

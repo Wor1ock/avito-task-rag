@@ -1,4 +1,4 @@
-# Main Hydra configuration: composes path/model groups and defines search parameters.
+# главный конфиг hydra: собирает группы path/model и задаёт параметры поиска
 defaults:
   - path: default
   - model: default
@@ -6,37 +6,36 @@ defaults:
   - override hydra/hydra_logging: none
   - _self_
 
-# Number of candidates retrieved by each first-stage retriever (BM25 / FAISS).
+# число кандидатов от каждого ретривера первой стадии (BM25 / FAISS)
 top_k_candidates: 250
-# Number of documents returned after fusion / re-ranking.
+# число документов после слияния / реранкинга
 top_k_final: 10
 
-# Hybrid search fusion parameters.
+# параметры гибридного слияния
 hybrid:
-  # Reciprocal Rank Fusion constant: score = sum(weight / (rrf_k + rank)).
+  # константа Reciprocal Rank Fusion: score = sum(weight / (rrf_k + rank))
   rrf_k: 30
   bm25_weight: 0.5
   dense_weight: 1
 
-# Chunk-to-article score aggregation in the dense branch: an article is
-# scored from its retrieved chunks' similarities before RRF fusion.
+# агрегация скоров чанков в скор статьи в плотной ветке до слияния RRF
 aggregation:
-  # One of: max_p (best chunk), avg_p (mean over retrieved chunks),
-  # sum_p (sum over retrieved chunks).
+  # одно из: max_p (лучший чанк), avg_p (среднее по найденным чанкам),
+  # sum_p (сумма по найденным чанкам)
   strategy: avg_p
 
-# Optional cross-encoder re-ranking stage (disabled in the baseline).
+# опциональная стадия реранкинга кросс-энкодером
 reranker:
   enabled: true
   model_name: "BAAI/bge-reranker-v2-m3"
-  # How many top fused candidates are re-scored by the cross-encoder; the
-  # RRF tail below this depth keeps its fusion order.
+  # сколько верхних слитых кандидатов пересчитывает кросс-энкодер; хвост RRF
+  # ниже этой глубины сохраняет порядок слияния
   rerank_depth: 15
 
-# Reproducible subsampling of the calibration/test query sets for faster
-# iteration. Set at most one of sample_frac (0 < f <= 1) or sample_size;
-# null for both disables sampling. random_state pins the selected rows so
-# validation numbers stay comparable across runs.
+# воспроизводимое сэмплирование калибровочных/тестовых запросов для быстрых
+# итераций. задавайте не больше одного из sample_frac (0 < f <= 1) или
+# sample_size; null у обоих отключает сэмплирование. random_state фиксирует
+# выбранные строки, чтобы значения валидации оставались сравнимыми между запусками
 sampling:
   sample_frac: 1
   sample_size: null

@@ -1,4 +1,4 @@
-"""Evaluation metrics, text preprocessing, logging, and small shared helpers."""
+"""метрики качества, предобработка текста, логирование и общие вспомогательные функции."""
 
 from __future__ import annotations
 
@@ -17,44 +17,33 @@ import pymorphy3
 import torch
 from nltk.corpus import stopwords
 
-# Matches any character that is not a word character (letters/digits/underscore,
-# Unicode-aware, so Cyrillic is preserved) and not whitespace — i.e. punctuation.
+# матчит любой символ, который не буква/цифра/подчёркивание (с поддержкой
+# Unicode, поэтому кириллица сохраняется) и не пробел — то есть пунктуацию
 _PUNCTUATION_RE = re.compile(r"[^\w\s]+")
 _WHITESPACE_RE = re.compile(r"\s+")
-# Script/style elements are dropped with their contents before the Markdown
-# conversion, which would otherwise leak their text into the output.
+# элементы script/style удаляются вместе с содержимым до конвертации в
+# Markdown, иначе их текст просочился бы в результат
 _HTML_INVISIBLE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
-# Three or more consecutive newlines collapse to one blank line.
+# три и более подряд идущих переноса строки схлопываются в одну пустую строку
 _EXCESS_NEWLINES_RE = re.compile(r"\n{3,}")
 
 logger = logging.getLogger("rag.utils")
 
 DEFAULT_LOG_FILE = Path("data/app.log")
-# Custom lemma -> canonical-cluster token mapping applied only in the BM25
-# tokenization path (the dense and cross-encoder branches see raw text).
+# кастомное отображение лемма -> кластерный токен, применяется только в
+# токенизации BM25 (плотная ветка и кросс-энкодер видят сырой текст)
 DEFAULT_SYNONYMS_FILE = Path("data/synonyms.json")
-# Project-specific stop-words merged into the NLTK Russian list for BM25
-# tokenization (one word per line).
+# проектные стоп-слова, объединяемые с русским списком NLTK для токенизации
+# BM25 (одно слово на строку)
 DEFAULT_STOPWORDS_FILE = Path("data/stopwords.txt")
 
-# The morphological analyzer is heavyweight (loads the Russian dictionaries),
-# so it is created lazily on first tokenization, not at import time.
+# морфологический анализатор тяжёлый (грузит русские словари), поэтому
+# создаётся лениво при первой токенизации, а не на импорте
 _morph_analyzer: pymorphy3.MorphAnalyzer | None = None
 
 
 @lru_cache(maxsize=1)
 def russian_stop_words() -> frozenset[str]:
-    """NLTK's official Russian stop-word list, fetched lazily.
-
-    The ``stopwords`` corpus is downloaded on first use when missing from the
-    local NLTK data directory; afterwards the set is served from cache.
-    Tokens are checked against this set both as-is and after lemmatization,
-    so base forms in the list (я, весь, этот, ...) also filter their
-    inflected variants.
-
-    Returns:
-        Frozen set of lowercase Russian stop-words.
-    """
     try:
         words = stopwords.words("russian")
     except LookupError:
@@ -65,100 +54,47 @@ def russian_stop_words() -> frozenset[str]:
 
 @lru_cache(maxsize=1)
 def custom_stop_words() -> frozenset[str]:
-    """Project-specific stop-words loaded once from :data:`DEFAULT_STOPWORDS_FILE`.
-
-    One word per line; both surface forms (здравствуйте, как) and lemmas
-    (мочь, хотеть) are supported since :func:`tokenize` checks tokens before
-    and after lemmatization.
-
-    Returns:
-        Frozen set of lowercase stop-words; empty when the file is missing.
-    """
     if not DEFAULT_STOPWORDS_FILE.exists():
-        logger.warning("Stop-word file %s not found: custom BM25 stop-words disabled", DEFAULT_STOPWORDS_FILE)
+        logger.warning("файл стоп-слов %s не найден: кастомные стоп-слова BM25 отключены", DEFAULT_STOPWORDS_FILE)
         return frozenset()
     words = DEFAULT_STOPWORDS_FILE.read_text(encoding="utf-8").split()
-    logger.info("Loaded %d custom stop-words from %s", len(words), DEFAULT_STOPWORDS_FILE)
+    logger.info("загружено %d кастомных стоп-слов из %s", len(words), DEFAULT_STOPWORDS_FILE)
     return frozenset(word.lower() for word in words)
 
 
 @lru_cache(maxsize=1)
 def bm25_stop_words() -> frozenset[str]:
-    """Union of the NLTK Russian and custom stop-word sets used by :func:`tokenize`."""
     return russian_stop_words() | custom_stop_words()
 
 
 @lru_cache(maxsize=1)
 def synonym_map() -> dict[str, str]:
-    """Custom lemma -> canonical-cluster token mapping for BM25 tokenization.
-
-    Loaded once from :data:`DEFAULT_SYNONYMS_FILE`. Keys must be lemmas: the
-    mapping is applied after pymorphy3 lemmatization, collapsing domain
-    synonyms (товар/заказ/посылка -> объект_сделки, ...) onto one shared
-    token so BM25 matches across the whole cluster. Only the lexical branch
-    uses it; dense and cross-encoder inputs stay untouched.
-
-    Returns:
-        Lowercase lemma -> cluster-token dict; empty when the file is missing.
-    """
     if not DEFAULT_SYNONYMS_FILE.exists():
-        logger.warning("Synonym file %s not found: BM25 synonym mapping disabled", DEFAULT_SYNONYMS_FILE)
+        logger.warning("файл синонимов %s не найден: отображение синонимов BM25 отключено", DEFAULT_SYNONYMS_FILE)
         return {}
     with DEFAULT_SYNONYMS_FILE.open(encoding="utf-8") as f:
         mapping = json.load(f)
-    logger.info("Loaded %d synonym mappings from %s", len(mapping), DEFAULT_SYNONYMS_FILE)
+    logger.info("загружено %d синонимических отображений из %s", len(mapping), DEFAULT_SYNONYMS_FILE)
     return {str(token).lower(): str(cluster).lower() for token, cluster in mapping.items()}
 
 
 def _build_markdown_converter() -> html2text.HTML2Text:
-    """Fresh html2text converter (the handler is stateful, so one per call)."""
     converter = html2text.HTML2Text()
-    converter.body_width = 0  # no hard line wrapping mid-sentence
-    converter.ignore_links = True  # keep anchor text, drop URLs (index noise)
+    converter.body_width = 0  # без жёсткого переноса строк посреди предложения
+    converter.ignore_links = True  # текст ссылки остаётся, URL выкидывается (шум для индекса)
     converter.ignore_images = True
-    converter.ignore_emphasis = True  # drop */_ markers; keep headers/lists/tables
+    converter.ignore_emphasis = True  # убираем маркеры */_; заголовки/списки/таблицы остаются
     converter.ul_item_mark = "-"
     return converter
 
 
 def html_to_markdown(html_text: str) -> str:
-    """Convert article HTML to Markdown, preserving list and table layout.
-
-    Script/style blocks are removed with their contents, then html2text
-    renders the remaining markup as Markdown: headers, bullet/numbered lists,
-    and tables keep their structure (one item/row per line) instead of being
-    flattened into a single undifferentiated line. HTML entities are unescaped
-    by the converter.
-
-    Args:
-        html_text: Raw HTML string (plain text passes through unchanged).
-
-    Returns:
-        Markdown-formatted plain-text string.
-    """
     text = _HTML_INVISIBLE_RE.sub(" ", html_text)
     markdown = _build_markdown_converter().handle(text)
     return _EXCESS_NEWLINES_RE.sub("\n\n", markdown).strip()
 
 
 def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
-    """Split text into character windows of ``chunk_size`` sharing ``chunk_overlap``.
-
-    Windows advance by ``chunk_size - chunk_overlap`` characters, so every
-    chunk repeats the tail of its predecessor and sentences cut by a boundary
-    stay intact in at least one chunk.
-
-    Args:
-        text: Input string.
-        chunk_size: Window length in characters.
-        chunk_overlap: Characters shared between consecutive windows.
-
-    Returns:
-        Stripped non-empty chunks in document order; empty list for blank input.
-
-    Raises:
-        ValueError: If ``chunk_overlap`` is not smaller than ``chunk_size``.
-    """
     if chunk_overlap >= chunk_size:
         raise ValueError(f"chunk_overlap ({chunk_overlap}) must be smaller than chunk_size ({chunk_size})")
     step = chunk_size - chunk_overlap
@@ -167,23 +103,14 @@ def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
         chunk = text[start : start + chunk_size].strip()
         if chunk:
             chunks.append(chunk)
-        # The window reached the end of the text: further starts would only
-        # produce suffixes of this chunk.
+        # окно достигло конца текста: следующие старты дали бы лишь суффиксы
+        # этого чанка
         if start + chunk_size >= len(text):
             break
     return chunks
 
 
 def normalize_text(text: str) -> str:
-    """Lowercase text and strip punctuation, collapsing repeated whitespace.
-
-    Args:
-        text: Raw input string.
-
-    Returns:
-        Normalized string: lowercase, punctuation replaced by spaces,
-        consecutive whitespace collapsed, leading/trailing whitespace removed.
-    """
     text = text.lower()
     text = _PUNCTUATION_RE.sub(" ", text)
     return _WHITESPACE_RE.sub(" ", text).strip()
@@ -191,18 +118,6 @@ def normalize_text(text: str) -> str:
 
 @lru_cache(maxsize=262_144)
 def lemmatize(token: str) -> str:
-    """Reduce a Russian token to its normal form (lemma) via pymorphy3.
-
-    Results are memoized: corpus vocabulary repeats heavily, so most lookups
-    hit the cache instead of the morphological analyzer. Non-Russian tokens
-    (Latin words, digits) pass through effectively unchanged.
-
-    Args:
-        token: A single lowercase word token.
-
-    Returns:
-        The token's lemma.
-    """
     global _morph_analyzer
     if _morph_analyzer is None:
         _morph_analyzer = pymorphy3.MorphAnalyzer()
@@ -210,20 +125,6 @@ def lemmatize(token: str) -> str:
 
 
 def tokenize(text: str) -> list[str]:
-    """Split text into lemma tokens for BM25, dropping Russian stop-words.
-
-    Pipeline: :func:`normalize_text` (lowercase, punctuation removal) ->
-    whitespace split -> stop-word filter (:func:`bm25_stop_words`: NLTK
-    Russian + custom list) -> :func:`lemmatize` -> stop-word filter on the
-    lemma (catches inflected forms of stop-words) -> synonym mapping
-    (:func:`synonym_map`) onto the lemma's canonical cluster token.
-
-    Args:
-        text: Raw input string.
-
-    Returns:
-        List of lowercase lemmas; empty list for empty/punctuation-only input.
-    """
     normalized = normalize_text(text)
     if not normalized:
         return []
@@ -240,14 +141,9 @@ def tokenize(text: str) -> list[str]:
 
 
 def set_seed(seed: int) -> None:
-    """Seed the Python, NumPy, and PyTorch RNGs for reproducible runs.
-
-    Args:
-        seed: Seed value applied to all three generators.
-    """
     random.seed(seed)
-    # Third-party libraries read NumPy's legacy global RNG state, so the
-    # legacy seeder (not a local Generator) is required here.
+    # сторонние библиотеки читают легаси-глобальное состояние ГСЧ NumPy,
+    # поэтому здесь нужен легаси-сидер, а не локальный Generator
     np.random.seed(seed)  # noqa: NPY002
     torch.manual_seed(seed)
 
@@ -257,19 +153,6 @@ def setup_logger(
     log_file: str | Path = DEFAULT_LOG_FILE,
     level: int = logging.INFO,
 ) -> logging.Logger:
-    """Configure a logger that writes to both the console and a log file.
-
-    Idempotent: repeated calls with the same ``name`` reuse the existing
-    handlers instead of duplicating them.
-
-    Args:
-        name: Logger name (child loggers inherit its handlers).
-        log_file: Destination log file; parent directories are created.
-        level: Minimum log level.
-
-    Returns:
-        Configured logger instance.
-    """
     logger = logging.getLogger(name)
     logger.setLevel(level)
     if logger.handlers:
@@ -294,20 +177,6 @@ def setup_logger(
 
 
 def average_precision_at_10(predicted: list[int], relevant: list[int], k: int = 10) -> float:
-    """Average Precision at ``k`` for a single query.
-
-    AP@k = (1 / min(|relevant|, k)) * sum over ranks i where the item is
-    relevant of precision@i. Rewards placing all relevant articles as high
-    as possible within the top ``k``.
-
-    Args:
-        predicted: Ranked predicted article ids (best first).
-        relevant: Ground-truth relevant article ids.
-        k: Rank cutoff.
-
-    Returns:
-        AP@k in [0, 1]; 0.0 when ``relevant`` is empty.
-    """
     relevant_set = set(relevant)
     if not relevant_set:
         return 0.0
@@ -321,18 +190,6 @@ def average_precision_at_10(predicted: list[int], relevant: list[int], k: int = 
 
 
 def calculate_map_at_10(predictions: list[list[int]], ground_truths: list[list[int]]) -> float:
-    """Mean Average Precision at 10 over a query set.
-
-    Args:
-        predictions: Per-query ranked predicted article ids (best first).
-        ground_truths: Per-query relevant article ids, aligned with ``predictions``.
-
-    Returns:
-        Mean of AP@10 over all queries; 0.0 for an empty input.
-
-    Raises:
-        ValueError: If the two lists have different lengths.
-    """
     if len(predictions) != len(ground_truths):
         raise ValueError(f"Got {len(predictions)} predictions for {len(ground_truths)} ground truths")
     if not predictions:

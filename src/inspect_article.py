@@ -1,14 +1,9 @@
-"""CLI to inspect the exact preprocessed text a given article is indexed with.
+"""утилита CLI: показывает точный предобработанный текст, под которым статья индексируется.
 
-Loads the corpus through the same pipeline as ``main.py`` (Feather ->
-HTML-to-Markdown -> title-boosted enrichment) and prints, for each requested
-``article_id``, the exact string fed to the BM25 tokenizer and the bi-encoder.
-Intended for qualitative debugging of the preprocessing stage.
-
-Run from the project root:
-
-    PYTHONUTF8=1 uv run python -m src.inspect_article 1870
-    PYTHONUTF8=1 uv run python -m src.inspect_article 1870 1951 --tokens
+грузит корпус тем же пайплайном, что и ``main.py`` (feather -> HTML в Markdown
+-> обогащение заголовком), и печатает для каждого запрошенного ``article_id``
+ту строку, которая подаётся в токенизатор BM25 и би-энкодер. предназначена для
+качественной отладки этапа предобработки.
 """
 
 from __future__ import annotations
@@ -29,50 +24,31 @@ SEPARATOR_WIDTH = 100
 
 
 def load_config(overrides: list[str] | None = None) -> AppConfig:
-    """Compose the Hydra config tree and validate it into :class:`AppConfig`.
-
-    Args:
-        overrides: Optional Hydra override strings (e.g. ``path.data_dir=mock_data``).
-
-    Returns:
-        Validated application config.
-    """
     with initialize(version_base=None, config_path="../configs"):
         cfg = compose(config_name="config", overrides=overrides or [])
     return AppConfig.model_validate(OmegaConf.to_container(cfg, resolve=True))
 
 
 def print_article(dataset: ArticleDataset, article_id: int, show_tokens: bool = False) -> bool:
-    """Print the enriched (indexed) representation of one article.
-
-    Args:
-        dataset: Loaded article dataset.
-        article_id: Article to inspect.
-        show_tokens: Also print the normalized BM25 token list.
-
-    Returns:
-        True if the article was found, False otherwise.
-    """
     article = next((a for a in dataset.articles if a.article_id == article_id), None)
     if article is None:
-        print(f"article_id={article_id}: not found in the corpus ({len(dataset)} articles)")
+        print(f"article_id={article_id}: не найден в корпусе ({len(dataset)} статей)")
         return False
     enriched = dataset.get_enriched_text(article)
     print("=" * SEPARATOR_WIDTH)
-    print(f"article_id={article.article_id} | title={article.title!r} | enriched length={len(enriched)} chars")
+    print(f"article_id={article.article_id} | title={article.title!r} | длина обогащённого текста={len(enriched)}")
     print("=" * SEPARATOR_WIDTH)
     print(enriched)
     if show_tokens:
         tokens = tokenize(enriched)
         print("-" * SEPARATOR_WIDTH)
-        print(f"BM25 tokens ({len(tokens)}):")
+        print(f"токены BM25 ({len(tokens)}):")
         print(" ".join(tokens))
     print()
     return True
 
 
 def main() -> None:
-    """Parse CLI arguments, load the corpus, and print the requested articles."""
     parser = argparse.ArgumentParser(
         description="Print the exact preprocessed (Markdown + title-boosted) text an article is indexed with."
     )

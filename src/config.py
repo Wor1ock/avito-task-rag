@@ -1,8 +1,8 @@
-"""Typed application configuration.
+"""типизированная конфигурация приложения.
 
-Pydantic v2 schemas that validate the composed Hydra tree (``configs/``)
-before it reaches the pipeline, so every parameter is checked once at startup
-and accessed through typed attributes instead of raw ``DictConfig`` keys.
+схемы pydantic v2 валидируют собранное hydra дерево конфигов (``configs/``)
+до входа в пайплайн: каждый параметр проверяется один раз на старте и читается
+через типизированные атрибуты вместо сырых ключей ``DictConfig``.
 """
 
 from __future__ import annotations
@@ -14,8 +14,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class PathConfig(BaseModel):
-    """Data and artifact locations (``configs/path``)."""
-
     data_dir: Path
     articles: Path
     calibration: Path
@@ -28,8 +26,6 @@ class PathConfig(BaseModel):
 
 
 class ModelConfig(BaseModel):
-    """Bi-encoder and chunking settings (``configs/model``)."""
-
     bi_encoder: str
     device: str | None = None
     batch_size: int = Field(gt=0)
@@ -46,22 +42,16 @@ class ModelConfig(BaseModel):
 
 
 class HybridConfig(BaseModel):
-    """Weighted Reciprocal Rank Fusion parameters."""
-
     rrf_k: float = Field(gt=0)
     bm25_weight: float = Field(ge=0)
     dense_weight: float = Field(ge=0)
 
 
 class AggregationConfig(BaseModel):
-    """Chunk-to-article score aggregation in the dense retrieval branch."""
-
     strategy: Literal["max_p", "avg_p", "sum_p"] = "max_p"
 
 
 class RerankerConfig(BaseModel):
-    """Optional cross-encoder re-ranking stage."""
-
     model_config = ConfigDict(protected_namespaces=())
 
     enabled: bool
@@ -70,8 +60,6 @@ class RerankerConfig(BaseModel):
 
 
 class SamplingConfig(BaseModel):
-    """Reproducible subsampling of the calibration/test query sets."""
-
     sample_frac: float | None = Field(default=None, gt=0, le=1)
     sample_size: int | None = Field(default=None, gt=0)
     random_state: int = 42
@@ -84,8 +72,6 @@ class SamplingConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
-    """Root config composed by Hydra from ``configs/config.yaml``."""
-
     path: PathConfig
     model: ModelConfig
     top_k_candidates: int = Field(gt=0)

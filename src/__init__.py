@@ -1,3 +1,3 @@
-"""Information Retrieval baseline package: dataset preparation, indexing, and hybrid search."""
+"""базовый пакет информационного поиска: подготовка данных, индексация и гибридный поиск."""
 
 __version__ = "0.1.0"

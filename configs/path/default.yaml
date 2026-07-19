@@ -1,18 +1,18 @@
-# Data and artifact locations. All paths are relative to the project root
-# (hydra.job.chdir is disabled in the main config).
+# размещение данных и артефактов. все пути относительны корня проекта
+# (hydra.job.chdir отключён в главном конфиге)
 data_dir: data
 
-# Source datasets (Feather).
+# исходные датасеты (Feather)
 articles: ${path.data_dir}/articles.f
 calibration: ${path.data_dir}/calibration.f
 test: ${path.data_dir}/test.f
 
-# Where built indexes are persisted.
+# куда сохраняются построенные индексы
 index_dir: ${path.data_dir}
 bm25_index: ${path.index_dir}/bm25.pkl
 faiss_index: ${path.index_dir}/faiss.index
 
-# Output submission file for the test set.
+# итоговый файл сабмита для тестового набора
 submission: answer.csv
-# Calibration predictions in submission format, kept for per-query error analysis.
+# предсказания калибровки в формате сабмита для анализа ошибок по запросам
 calibration_answer: ${path.data_dir}/calibration_answer.csv

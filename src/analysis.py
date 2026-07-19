@@ -1,14 +1,9 @@
-"""Error analysis for calibration retrieval quality.
+"""анализ ошибок качества поиска на калибровочном наборе.
 
-Joins the persisted calibration predictions (submission format, written by
-``main.py``) with the calibration ground truth, recomputes per-query AP@10
-with the exact metric implementation, and prints aggregate statistics plus
-the worst-performing queries for manual qualitative inspection.
-
-Run from the project root (after a ``main.py`` run has produced the
-calibration predictions artifact):
-
-    PYTHONUTF8=1 uv run python -m src.analysis
+объединяет сохранённые предсказания калибровки (формат сабмита, их пишет
+``main.py``) с разметкой, пересчитывает AP@10 по каждому запросу той же
+реализацией метрики и печатает агрегированную статистику плюс худшие запросы
+для ручного качественного разбора.
 """
 
 from __future__ import annotations
@@ -31,29 +26,10 @@ QUERY_TEXT_PREVIEW_CHARS = 120
 
 
 def parse_id_string(value: str) -> list[int]:
-    """Space-separated id string (submission ``answer`` format) -> int list."""
     return [int(token) for token in str(value).split()]
 
 
 def build_analysis_table(calibration: pd.DataFrame, predictions: pd.DataFrame, top_k: int = 10) -> pd.DataFrame:
-    """Per-query error breakdown of predictions against the ground truth.
-
-    Rows are joined on ``query_id`` (both sides cast to int), so a predictions
-    file produced from a sampled calibration run is analyzed over exactly the
-    queries it contains.
-
-    Args:
-        calibration: Ground-truth table with ``query_id``, ``query_text``,
-            and ``ground_truth`` (space-separated relevant article ids).
-        predictions: Submission-format table with ``query_id`` and ``answer``.
-        top_k: Rank cutoff of the metric.
-
-    Returns:
-        One row per analyzed query, sorted by increasing ``ap_10`` (worst
-        first, ties broken by ``query_id``), with columns: ``query_id``,
-        ``query_text``, ``ap_10``, ``num_found``, ``ground_truth_ids``,
-        ``predicted_ids``, ``missed_ids``, ``top_false_positives``.
-    """
     calibration = calibration.assign(query_id=calibration["query_id"].astype(int))
     predictions = predictions.assign(
         query_id=predictions["query_id"].astype(int),
@@ -62,7 +38,7 @@ def build_analysis_table(calibration: pd.DataFrame, predictions: pd.DataFrame, t
     merged = calibration.merge(predictions, on="query_id", how="inner", validate="one_to_one")
     if len(merged) < len(calibration):
         logger.warning(
-            "Predictions cover %d of %d calibration queries: analyzing the intersection only",
+            "предсказания покрывают %d из %d калибровочных запросов: анализируется только пересечение",
             len(merged),
             len(calibration),
         )
@@ -82,7 +58,7 @@ def build_analysis_table(calibration: pd.DataFrame, predictions: pd.DataFrame, t
                 "ground_truth_ids": truth,
                 "predicted_ids": predicted,
                 "missed_ids": [article_id for article_id in truth if article_id not in predicted_set],
-                # Incorrect ids in ranking order, i.e. the noise pushed to the top.
+                # ошибочные id в порядке ранжирования, то есть шум, вытолкнутый наверх
                 "top_false_positives": [article_id for article_id in predicted if article_id not in truth_set],
             }
         )
@@ -90,29 +66,23 @@ def build_analysis_table(calibration: pd.DataFrame, predictions: pd.DataFrame, t
 
 
 def print_report(analysis: pd.DataFrame, worst_n: int = WORST_QUERIES_TO_SHOW) -> None:
-    """Print aggregate statistics and the worst-performing queries.
-
-    Args:
-        analysis: Output of :func:`build_analysis_table` (sorted worst-first).
-        worst_n: Number of lowest-AP@10 queries to detail.
-    """
     total = len(analysis)
     if total == 0:
-        print("No overlapping queries between predictions and calibration: nothing to analyze")
+        print("нет пересечения запросов между предсказаниями и калибровкой: анализировать нечего")
         return
     map_10 = float(analysis["ap_10"].mean())
     failures = int((analysis["ap_10"] == 0.0).sum())
     perfect = int((analysis["ap_10"] == 1.0).sum())
 
     print("=" * 100)
-    print("CALIBRATION ERROR ANALYSIS")
+    print("анализ ошибок на калибровке")
     print("=" * 100)
-    print(f"Total queries analyzed   : {total}")
-    print(f"Overall MAP@10           : {map_10:.4f}")
-    print(f"Complete failures (AP=0) : {failures} ({failures / total:.1%})")
-    print(f"Perfect matches (AP=1)   : {perfect} ({perfect / total:.1%})")
+    print(f"всего проанализировано   : {total}")
+    print(f"общая метрика MAP@10     : {map_10:.4f}")
+    print(f"полные провалы (AP=0)    : {failures} ({failures / total:.1%})")
+    print(f"идеальные ответы (AP=1)  : {perfect} ({perfect / total:.1%})")
     print()
-    print(f"TOP {min(worst_n, total)} WORST QUERIES (lowest AP@10)")
+    print(f"топ {min(worst_n, total)} худших запросов (наименьший AP@10)")
     print("-" * 100)
     for position, row in enumerate(analysis.head(worst_n).itertuples(index=False), start=1):
         text = row.query_text.replace("\n", " ")
@@ -120,23 +90,18 @@ def print_report(analysis: pd.DataFrame, worst_n: int = WORST_QUERIES_TO_SHOW) -
             text = text[: QUERY_TEXT_PREVIEW_CHARS - 3] + "..."
         header = (
             f"#{position:>2} | query_id={row.query_id} | AP@10={row.ap_10:.3f}"
-            f" | found {row.num_found}/{len(row.ground_truth_ids)}"
+            f" | найдено {row.num_found}/{len(row.ground_truth_ids)}"
         )
         print(header)
-        print(f"     query               : {text}")
-        print(f"     ground truth ids    : {row.ground_truth_ids}")
-        print(f"     missed ids          : {row.missed_ids}")
-        print(f"     top false positives : {row.top_false_positives[:FALSE_POSITIVES_TO_SHOW]}")
+        print(f"     запрос               : {text}")
+        print(f"     релевантные id       : {row.ground_truth_ids}")
+        print(f"     пропущенные id       : {row.missed_ids}")
+        print(f"     ложные срабатывания  : {row.top_false_positives[:FALSE_POSITIVES_TO_SHOW]}")
         print("-" * 100)
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
-    """Load predictions + ground truth, compute per-query AP@10, print the report.
-
-    Args:
-        cfg: Hydra-composed configuration (validated into :class:`AppConfig`).
-    """
     config = AppConfig.model_validate(OmegaConf.to_container(cfg, resolve=True))
     setup_logger(log_file=config.path.data_dir / "app.log")
 
@@ -148,7 +113,7 @@ def main(cfg: DictConfig) -> None:
         config.path.calibration, required_columns=("query_id", "query_text", "ground_truth")
     )
     predictions = pd.read_csv(config.path.calibration_answer)
-    logger.info("Loaded %d predictions from %s", len(predictions), config.path.calibration_answer)
+    logger.info("загружено %d предсказаний из %s", len(predictions), config.path.calibration_answer)
 
     analysis = build_analysis_table(calibration, predictions, top_k=config.top_k_final)
     print_report(analysis)

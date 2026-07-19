@@ -1,8 +1,8 @@
-"""Hybrid index construction: article-level BM25 and chunk-level dense FAISS.
+"""построение гибридного индекса: BM25 по статьям и плотный FAISS по чанкам.
 
-Pipeline: ArticleDataset -> (enriched texts -> tokenized corpus -> BM25Okapi,
-title-prefixed chunks -> dense embeddings -> L2-normalize -> IndexFlatIP)
--> persisted artifacts, each FAISS position mapped to its parent article_id.
+пайплайн: ArticleDataset -> (обогащённые тексты -> токенизированный корпус ->
+BM25Okapi, чанки с заголовком -> эмбеддинги -> L2-нормализация -> IndexFlatIP)
+-> сохранённые артефакты, каждая позиция FAISS привязана к article_id родительской статьи.
 """
 
 from __future__ import annotations
@@ -25,13 +25,6 @@ DEFAULT_EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-
 
 
 class HybridIndexer:
-    """Builds and persists a sparse (BM25) and a dense (FAISS) index in lockstep.
-
-    BM25 positions map to whole articles via :attr:`article_ids`; FAISS
-    positions map to overlapping article chunks whose parent article_id is
-    kept, position-aligned, in :attr:`chunk_article_ids`.
-    """
-
     def __init__(
         self,
         model_name: str = DEFAULT_EMBEDDING_MODEL,
@@ -42,19 +35,6 @@ class HybridIndexer:
         chunk_size: int = 500,
         chunk_overlap: int = 50,
     ) -> None:
-        """
-        Args:
-            model_name: sentence-transformers bi-encoder checkpoint.
-            batch_size: Encoding batch size.
-            device: Torch device ("cpu"/"cuda"); auto-detected when None.
-            max_seq_length: Encoder input truncation length; model default when None.
-            normalize_embeddings: L2-normalize embeddings so inner product in
-                :class:`faiss.IndexFlatIP` equals cosine similarity.
-            chunk_size: Character window length for article chunking
-                (``model.chunk_size``).
-            chunk_overlap: Characters shared between consecutive chunks
-                (``model.chunk_overlap``).
-        """
         self.model_name = model_name
         self.batch_size = batch_size
         self.device = device
@@ -69,27 +49,15 @@ class HybridIndexer:
         self.chunk_article_ids: list[int] = []
 
     def _load_model(self) -> SentenceTransformer:
-        """Lazily instantiate the bi-encoder (kept for query encoding reuse)."""
         if self.model is None:
             start = time.perf_counter()
             self.model = SentenceTransformer(self.model_name, device=self.device)
             if self.max_seq_length is not None:
                 self.model.max_seq_length = self.max_seq_length
-            logger.info("Loaded embedding model %s in %.1fs", self.model_name, time.perf_counter() - start)
+            logger.info("модель эмбеддингов %s загружена за %.1f с", self.model_name, time.perf_counter() - start)
         return self.model
 
     def encode(self, texts: list[str], show_progress: bool = False) -> np.ndarray:
-        """Encode texts into a float32 matrix, L2-normalized when configured.
-
-        Args:
-            texts: Texts to embed (corpus or queries).
-            show_progress: Whether to display an encoding progress bar.
-
-        Returns:
-            Array of shape ``(len(texts), dim)``; with unit-norm rows when
-            :attr:`normalize_embeddings` is enabled, so inner product in
-            :class:`faiss.IndexFlatIP` equals cosine similarity.
-        """
         model = self._load_model()
         embeddings = model.encode(
             texts,
@@ -102,14 +70,6 @@ class HybridIndexer:
         return embeddings
 
     def build_index(self, dataset: ArticleDataset) -> None:
-        """Build both indexes from the dataset's enriched corpus.
-
-        Args:
-            dataset: Loaded article dataset.
-
-        Raises:
-            ValueError: If the dataset is empty.
-        """
         if len(dataset) == 0:
             raise ValueError("Cannot build an index over an empty dataset")
         self.article_ids = [article.article_id for article in dataset.articles]
@@ -117,7 +77,7 @@ class HybridIndexer:
         start = time.perf_counter()
         tokenized_corpus = dataset.get_tokenized_corpus()
         self.bm25 = BM25Okapi(tokenized_corpus)
-        logger.info("Built BM25 index over %d documents in %.2fs", len(dataset), time.perf_counter() - start)
+        logger.info("индекс BM25 по %d документам построен за %.2f с", len(dataset), time.perf_counter() - start)
 
         start = time.perf_counter()
         chunks, self.chunk_article_ids = dataset.get_chunked_corpus(self.chunk_size, self.chunk_overlap)
@@ -125,7 +85,7 @@ class HybridIndexer:
         self.faiss_index = faiss.IndexFlatIP(embeddings.shape[1])
         self.faiss_index.add(embeddings)
         logger.info(
-            "Built FAISS IndexFlatIP (%d chunk vectors over %d articles, dim=%d) in %.2fs",
+            "индекс FAISS IndexFlatIP (%d векторов чанков по %d статьям, dim=%d) построен за %.2f с",
             self.faiss_index.ntotal,
             len(dataset),
             embeddings.shape[1],
@@ -133,16 +93,6 @@ class HybridIndexer:
         )
 
     def save(self, bm25_path: str | Path, faiss_path: str | Path) -> None:
-        """Persist both indexes and the article id mapping.
-
-        Args:
-            bm25_path: Destination for the pickled BM25 index + the article_ids
-                and chunk_article_ids position mappings.
-            faiss_path: Destination for the serialized FAISS index.
-
-        Raises:
-            RuntimeError: If :meth:`build_index` has not been called.
-        """
         if self.bm25 is None or self.faiss_index is None:
             raise RuntimeError("Nothing to save: call build_index() first")
         bm25_path = Path(bm25_path)
@@ -156,4 +106,4 @@ class HybridIndexer:
                 f,
             )
         faiss.write_index(self.faiss_index, str(faiss_path))
-        logger.info("Saved BM25 index to %s and FAISS index to %s", bm25_path, faiss_path)
+        logger.info("индекс BM25 сохранён в %s, индекс FAISS — в %s", bm25_path, faiss_path)
