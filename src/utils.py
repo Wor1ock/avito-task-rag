@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import random
 import re
@@ -26,7 +27,12 @@ _HTML_INVISIBLE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1\s*>", re.IGNORE
 # Three or more consecutive newlines collapse to one blank line.
 _EXCESS_NEWLINES_RE = re.compile(r"\n{3,}")
 
+logger = logging.getLogger("rag.utils")
+
 DEFAULT_LOG_FILE = Path("data/app.log")
+# Custom lemma -> canonical-cluster token mapping applied only in the BM25
+# tokenization path (the dense and cross-encoder branches see raw text).
+DEFAULT_SYNONYMS_FILE = Path("data/synonyms.json")
 
 # The morphological analyzer is heavyweight (loads the Russian dictionaries),
 # so it is created lazily on first tokenization, not at import time.
@@ -52,6 +58,28 @@ def russian_stop_words() -> frozenset[str]:
         nltk.download("stopwords", quiet=True)
         words = stopwords.words("russian")
     return frozenset(words)
+
+
+@lru_cache(maxsize=1)
+def synonym_map() -> dict[str, str]:
+    """Custom lemma -> canonical-cluster token mapping for BM25 tokenization.
+
+    Loaded once from :data:`DEFAULT_SYNONYMS_FILE`. Keys must be lemmas: the
+    mapping is applied after pymorphy3 lemmatization, collapsing domain
+    synonyms (товар/заказ/посылка -> объект_сделки, ...) onto one shared
+    token so BM25 matches across the whole cluster. Only the lexical branch
+    uses it; dense and cross-encoder inputs stay untouched.
+
+    Returns:
+        Lowercase lemma -> cluster-token dict; empty when the file is missing.
+    """
+    if not DEFAULT_SYNONYMS_FILE.exists():
+        logger.warning("Synonym file %s not found: BM25 synonym mapping disabled", DEFAULT_SYNONYMS_FILE)
+        return {}
+    with DEFAULT_SYNONYMS_FILE.open(encoding="utf-8") as f:
+        mapping = json.load(f)
+    logger.info("Loaded %d synonym mappings from %s", len(mapping), DEFAULT_SYNONYMS_FILE)
+    return {str(token).lower(): str(cluster).lower() for token, cluster in mapping.items()}
 
 
 def _build_markdown_converter() -> html2text.HTML2Text:
@@ -159,7 +187,8 @@ def tokenize(text: str) -> list[str]:
     Pipeline: :func:`normalize_text` (lowercase, punctuation removal) ->
     whitespace split -> stop-word filter (:func:`russian_stop_words`) ->
     :func:`lemmatize` -> stop-word filter on the lemma (catches inflected
-    forms of stop-words).
+    forms of stop-words) -> synonym mapping (:func:`synonym_map`) onto the
+    lemma's canonical cluster token.
 
     Args:
         text: Raw input string.
@@ -171,13 +200,14 @@ def tokenize(text: str) -> list[str]:
     if not normalized:
         return []
     stop_words = russian_stop_words()
+    synonyms = synonym_map()
     tokens: list[str] = []
     for token in normalized.split():
         if token in stop_words:
             continue
         lemma = lemmatize(token)
         if lemma not in stop_words:
-            tokens.append(lemma)
+            tokens.append(synonyms.get(lemma, lemma))
     return tokens
 
 
