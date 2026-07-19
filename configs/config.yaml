@@ -15,7 +15,7 @@ top_k_final: 10
 hybrid:
   # Reciprocal Rank Fusion constant: score = sum(weight / (rrf_k + rank)).
   rrf_k: 30
-  bm25_weight: 0
+  bm25_weight: 0.5
   dense_weight: 1
 
 # Chunk-to-article score aggregation in the dense branch: an article is
@@ -23,7 +23,7 @@ hybrid:
 aggregation:
   # One of: max_p (best chunk), avg_p (mean over retrieved chunks),
   # sum_p (sum over retrieved chunks).
-  strategy: max_p
+  strategy: avg_p
 
 # Optional cross-encoder re-ranking stage (disabled in the baseline).
 reranker:
