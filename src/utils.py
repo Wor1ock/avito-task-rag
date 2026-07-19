@@ -33,6 +33,9 @@ DEFAULT_LOG_FILE = Path("data/app.log")
 # Custom lemma -> canonical-cluster token mapping applied only in the BM25
 # tokenization path (the dense and cross-encoder branches see raw text).
 DEFAULT_SYNONYMS_FILE = Path("data/synonyms.json")
+# Project-specific stop-words merged into the NLTK Russian list for BM25
+# tokenization (one word per line).
+DEFAULT_STOPWORDS_FILE = Path("data/stopwords.txt")
 
 # The morphological analyzer is heavyweight (loads the Russian dictionaries),
 # so it is created lazily on first tokenization, not at import time.
@@ -58,6 +61,31 @@ def russian_stop_words() -> frozenset[str]:
         nltk.download("stopwords", quiet=True)
         words = stopwords.words("russian")
     return frozenset(words)
+
+
+@lru_cache(maxsize=1)
+def custom_stop_words() -> frozenset[str]:
+    """Project-specific stop-words loaded once from :data:`DEFAULT_STOPWORDS_FILE`.
+
+    One word per line; both surface forms (здравствуйте, как) and lemmas
+    (мочь, хотеть) are supported since :func:`tokenize` checks tokens before
+    and after lemmatization.
+
+    Returns:
+        Frozen set of lowercase stop-words; empty when the file is missing.
+    """
+    if not DEFAULT_STOPWORDS_FILE.exists():
+        logger.warning("Stop-word file %s not found: custom BM25 stop-words disabled", DEFAULT_STOPWORDS_FILE)
+        return frozenset()
+    words = DEFAULT_STOPWORDS_FILE.read_text(encoding="utf-8").split()
+    logger.info("Loaded %d custom stop-words from %s", len(words), DEFAULT_STOPWORDS_FILE)
+    return frozenset(word.lower() for word in words)
+
+
+@lru_cache(maxsize=1)
+def bm25_stop_words() -> frozenset[str]:
+    """Union of the NLTK Russian and custom stop-word sets used by :func:`tokenize`."""
+    return russian_stop_words() | custom_stop_words()
 
 
 @lru_cache(maxsize=1)
@@ -185,10 +213,10 @@ def tokenize(text: str) -> list[str]:
     """Split text into lemma tokens for BM25, dropping Russian stop-words.
 
     Pipeline: :func:`normalize_text` (lowercase, punctuation removal) ->
-    whitespace split -> stop-word filter (:func:`russian_stop_words`) ->
-    :func:`lemmatize` -> stop-word filter on the lemma (catches inflected
-    forms of stop-words) -> synonym mapping (:func:`synonym_map`) onto the
-    lemma's canonical cluster token.
+    whitespace split -> stop-word filter (:func:`bm25_stop_words`: NLTK
+    Russian + custom list) -> :func:`lemmatize` -> stop-word filter on the
+    lemma (catches inflected forms of stop-words) -> synonym mapping
+    (:func:`synonym_map`) onto the lemma's canonical cluster token.
 
     Args:
         text: Raw input string.
@@ -199,7 +227,7 @@ def tokenize(text: str) -> list[str]:
     normalized = normalize_text(text)
     if not normalized:
         return []
-    stop_words = russian_stop_words()
+    stop_words = bm25_stop_words()
     synonyms = synonym_map()
     tokens: list[str] = []
     for token in normalized.split():
